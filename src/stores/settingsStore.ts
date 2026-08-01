@@ -117,6 +117,10 @@ const settingUpdaters: {
     commands.changeTranslationEnabledSetting(value as boolean),
   translation_target_language: (value) =>
     commands.changeTranslationTargetLanguageSetting(value as string),
+  dual_model_enabled: (value) =>
+    commands.changeDualModelEnabledSetting(value as boolean),
+  secondary_model_id: (value) =>
+    commands.changeSecondaryModelSetting((value as string) || null),
   selected_language: (value) =>
     commands.changeSelectedLanguageSetting(value as string),
   overlay_position: (value) =>

@@ -350,6 +350,13 @@
         "targetLabel": "Translation target",
         "targetDescription": "Choose the language produced by the translation shortcut."
       },
+      "dualModel": {
+        "label": "Dual-model verification",
+        "description": "Run a second local speech model after recording to compare results. This may use more memory and time.",
+        "secondaryLabel": "Verification model",
+        "secondaryDescription": "Choose a downloaded model that differs from the primary model.",
+        "selectPlaceholder": "Select a verification model"
+      },
       "modelUnload": {
         "title": "Unload Model",
         "description": "Automatically free GPU/CPU memory when the model hasn't been used for the specified time",

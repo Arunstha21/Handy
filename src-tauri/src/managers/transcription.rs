@@ -92,6 +92,97 @@ pub enum TranscriptionTask {
     Translate { target_language: String },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TranscriptCandidate {
+    pub model_id: String,
+    pub text: String,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ResolutionMethod {
+    PrimaryAgreement,
+    PrimaryFallback,
+    SecondaryFallback,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolvedTranscript {
+    pub text: String,
+    pub selected_model_id: String,
+    pub agreement_score: f32,
+    pub method: ResolutionMethod,
+    pub candidates: Vec<TranscriptCandidate>,
+}
+
+fn normalized_transcript(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Resolve two model outputs conservatively. Agreement keeps the primary
+/// formatting; disagreement keeps a complete primary sentence rather than
+/// manufacturing a potentially incoherent word-by-word splice. This is the
+/// safe baseline for dual inference; benchmark-backed voting can replace it
+/// without changing the inference contract.
+pub fn resolve_transcript_candidates(
+    candidates: Vec<TranscriptCandidate>,
+) -> Result<ResolvedTranscript> {
+    let primary = candidates
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No transcription candidates were produced"))?;
+    let primary_ok = primary.error.is_none() && !primary.text.trim().is_empty();
+    let secondary = candidates
+        .iter()
+        .skip(1)
+        .find(|candidate| candidate.error.is_none() && !candidate.text.trim().is_empty());
+
+    if primary_ok {
+        if let Some(secondary) = secondary {
+            let primary_normalized = normalized_transcript(&primary.text);
+            let secondary_normalized = normalized_transcript(&secondary.text);
+            let agreement_score =
+                strsim::normalized_levenshtein(&primary_normalized, &secondary_normalized) as f32;
+            return Ok(ResolvedTranscript {
+                text: primary.text.clone(),
+                selected_model_id: primary.model_id.clone(),
+                agreement_score,
+                method: if agreement_score >= 0.80 {
+                    ResolutionMethod::PrimaryAgreement
+                } else {
+                    ResolutionMethod::PrimaryFallback
+                },
+                candidates,
+            });
+        }
+
+        return Ok(ResolvedTranscript {
+            text: primary.text.clone(),
+            selected_model_id: primary.model_id.clone(),
+            agreement_score: 0.0,
+            method: ResolutionMethod::PrimaryFallback,
+            candidates,
+        });
+    }
+
+    let secondary = secondary.ok_or_else(|| {
+        anyhow::anyhow!(
+            "All transcription candidates failed: {}",
+            primary.error.as_deref().unwrap_or("empty transcription")
+        )
+    })?;
+    Ok(ResolvedTranscript {
+        text: secondary.text.clone(),
+        selected_model_id: secondary.model_id.clone(),
+        agreement_score: 0.0,
+        method: ResolutionMethod::SecondaryFallback,
+        candidates,
+    })
+}
+
 /// Emitted to switch the streaming overlay to a working spinner.
 #[derive(Clone, Debug, Serialize, Deserialize, Type, tauri_specta::Event)]
 pub struct StreamPhaseEvent {
@@ -1137,6 +1228,82 @@ impl TranscriptionManager {
         self.transcribe_with_task(audio, task)
     }
 
+    /// Run the primary and secondary models on identical audio. The current
+    /// manager owns one engine, so this first implementation swaps models in a
+    /// bounded sequence and restores the primary selection before returning.
+    /// The default single-model path remains untouched; an engine pool can
+    /// replace this implementation once memory benchmarks justify residency.
+    pub fn transcribe_with_secondary(
+        &self,
+        audio: Vec<f32>,
+        task: TranscriptionTask,
+        secondary_model_id: &str,
+    ) -> Result<ResolvedTranscript> {
+        let settings = get_settings(&self.app_handle);
+        let primary_model_id = self
+            .get_current_model()
+            .unwrap_or_else(|| settings.selected_model.clone());
+        if primary_model_id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No primary transcription model is selected"
+            ));
+        }
+        if secondary_model_id == primary_model_id {
+            return Err(anyhow::anyhow!(
+                "The secondary transcription model must differ from the primary model"
+            ));
+        }
+
+        let primary_started = Instant::now();
+        let primary_result = self.transcribe_with_task(audio.clone(), task.clone());
+        let primary_candidate = match primary_result {
+            Ok(text) => TranscriptCandidate {
+                model_id: primary_model_id.clone(),
+                text,
+                elapsed_ms: primary_started.elapsed().as_millis() as u64,
+                error: None,
+            },
+            Err(error) => TranscriptCandidate {
+                model_id: primary_model_id.clone(),
+                text: String::new(),
+                elapsed_ms: primary_started.elapsed().as_millis() as u64,
+                error: Some(error.to_string()),
+            },
+        };
+
+        let secondary_started = Instant::now();
+        let secondary_result = (|| -> Result<String> {
+            self.load_model(secondary_model_id)?;
+            self.transcribe_with_task(audio, task)
+        })();
+        let secondary_candidate = match secondary_result {
+            Ok(text) => TranscriptCandidate {
+                model_id: secondary_model_id.to_string(),
+                text,
+                elapsed_ms: secondary_started.elapsed().as_millis() as u64,
+                error: None,
+            },
+            Err(error) => TranscriptCandidate {
+                model_id: secondary_model_id.to_string(),
+                text: String::new(),
+                elapsed_ms: secondary_started.elapsed().as_millis() as u64,
+                error: Some(error.to_string()),
+            },
+        };
+
+        // Restore the user's primary model even if the verifier failed. Honor
+        // the existing immediate-unload policy after restoration.
+        if let Err(error) = self.load_model(&primary_model_id) {
+            warn!(
+                "Failed to restore primary model '{}': {}",
+                primary_model_id, error
+            );
+        }
+        self.maybe_unload_immediately("dual-model restore");
+
+        resolve_transcript_candidates(vec![primary_candidate, secondary_candidate])
+    }
+
     pub fn transcribe_with_task(&self, audio: Vec<f32>, task: TranscriptionTask) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
@@ -2003,6 +2170,58 @@ pub fn get_available_accelerators() -> AvailableAccelerators {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolver_keeps_primary_formatting_when_candidates_agree() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: "Hello, world!".to_string(),
+                elapsed_ms: 10,
+                error: None,
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: " hello   world ".to_string(),
+                elapsed_ms: 12,
+                error: None,
+            },
+        ])
+        .expect("matching candidates should resolve");
+
+        assert_eq!(resolved.text, "Hello, world!");
+        assert!(matches!(
+            resolved.method,
+            ResolutionMethod::PrimaryAgreement
+        ));
+        assert!(resolved.agreement_score > 0.8);
+    }
+
+    #[test]
+    fn resolver_uses_secondary_when_primary_fails() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: String::new(),
+                elapsed_ms: 10,
+                error: Some("model failed".to_string()),
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: "Recovered output".to_string(),
+                elapsed_ms: 12,
+                error: None,
+            },
+        ])
+        .expect("secondary candidate should recover a failed primary");
+
+        assert_eq!(resolved.text, "Recovered output");
+        assert_eq!(resolved.selected_model_id, "secondary");
+        assert!(matches!(
+            resolved.method,
+            ResolutionMethod::SecondaryFallback
+        ));
+    }
 
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()

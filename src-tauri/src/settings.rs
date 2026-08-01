@@ -375,6 +375,11 @@ pub struct AppSettings {
     pub whats_new_last_seen_version: String,
     #[serde(default = "default_model")]
     pub selected_model: String,
+    /// Optional second local ASR model used for experimental verification.
+    #[serde(default)]
+    pub secondary_model_id: Option<String>,
+    #[serde(default)]
+    pub dual_model_enabled: bool,
     #[serde(default)]
     pub onboarding_completed: bool,
     #[serde(default = "default_always_on_microphone")]
@@ -887,6 +892,8 @@ pub fn get_default_settings() -> AppSettings {
         show_whats_new_on_update: default_show_whats_new_on_update(),
         whats_new_last_seen_version: default_whats_new_last_seen_version(),
         selected_model: "".to_string(),
+        secondary_model_id: None,
+        dual_model_enabled: false,
         onboarding_completed: false,
         always_on_microphone: false,
         selected_microphone: None,

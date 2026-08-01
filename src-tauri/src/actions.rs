@@ -524,11 +524,25 @@ impl ShortcutAction for TranscribeAction {
         // Get the microphone mode to determine audio feedback timing
         let plan_started = Instant::now();
         let is_always_on = settings.always_on_microphone;
+        let dual_model_id = if settings.dual_model_enabled {
+            settings.secondary_model_id.clone().filter(|secondary_id| {
+                selected_model_info
+                    .as_ref()
+                    .map(|primary| primary.id != *secondary_id)
+                    .unwrap_or(false)
+                    && app
+                        .state::<Arc<ModelManager>>()
+                        .get_model_info(secondary_id)
+                        .is_some_and(|secondary| secondary.is_downloaded)
+            })
+        } else {
+            None
+        };
 
         // Use the app-facing model capability as the single pre-recording source
         // for live streaming decisions. Unknown support is represented as false
         // until the model registry is updated by discovery or runtime load.
-        let model_supports_streaming = (!self.translation)
+        let model_supports_streaming = (!self.translation && dual_model_id.is_none())
             && selected_model_info
                 .as_ref()
                 .map(|m| m.supports_streaming)
@@ -678,7 +692,20 @@ impl ShortcutAction for TranscribeAction {
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
         let translation = self.translation;
-        let translation_target = get_settings(app).translation_target_language;
+        let stop_settings = get_settings(app);
+        let translation_target = stop_settings.translation_target_language;
+        let dual_model_id = if stop_settings.dual_model_enabled {
+            stop_settings.secondary_model_id.filter(|secondary_id| {
+                !secondary_id.trim().is_empty()
+                    && secondary_id != &stop_settings.selected_model
+                    && app
+                        .state::<Arc<ModelManager>>()
+                        .get_model_info(secondary_id)
+                        .is_some_and(|model| model.is_downloaded)
+            })
+        } else {
+            None
+        };
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -733,16 +760,26 @@ impl ShortcutAction for TranscribeAction {
                     } else {
                         TranscriptionTask::Transcribe
                     };
-                    let transcription_result = match tm.finalize_stream() {
-                        // A finalized stream with usable text wins. An empty result
-                        // (no active stream, produced nothing, or a finalize error
-                        // after the engine was returned) falls back to a full batch
-                        // transcription of the same audio. A finalize timeout is
-                        // surfaced instead — the worker may still hold the engine,
-                        // so a batch fallback would contend with it.
-                        Ok(Some(text)) if !translation && !text.trim().is_empty() => Ok(text),
-                        Ok(_) => tm.transcribe_with_task(samples, transcription_task),
-                        Err(err) => Err(err),
+                    let transcription_result = if let Some(secondary_model_id) = dual_model_id {
+                        tm.cancel_stream();
+                        tm.transcribe_with_secondary(
+                            samples,
+                            transcription_task,
+                            &secondary_model_id,
+                        )
+                        .map(|resolved| resolved.text)
+                    } else {
+                        match tm.finalize_stream() {
+                            // A finalized stream with usable text wins. An empty result
+                            // (no active stream, produced nothing, or a finalize error
+                            // after the engine was returned) falls back to a full batch
+                            // transcription of the same audio. A finalize timeout is
+                            // surfaced instead — the worker may still hold the engine,
+                            // so a batch fallback would contend with it.
+                            Ok(Some(text)) if !translation && !text.trim().is_empty() => Ok(text),
+                            Ok(_) => tm.transcribe_with_task(samples, transcription_task),
+                            Err(err) => Err(err),
+                        }
                     };
 
                     // Await WAV save and verify

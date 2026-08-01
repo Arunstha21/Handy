@@ -644,6 +644,30 @@ pub fn change_translation_target_language_setting(
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_dual_model_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.dual_model_enabled = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_secondary_model_setting(
+    app: AppHandle,
+    model_id: Option<String>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    if model_id.as_deref() == Some(settings.selected_model.as_str()) {
+        return Err("The verification model must differ from the primary model".to_string());
+    }
+    settings.secondary_model_id = model_id.filter(|id| !id.trim().is_empty());
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.selected_language = language;
