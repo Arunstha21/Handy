@@ -738,6 +738,22 @@ pub fn change_translation_target_language_setting(
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_selected_text_translation_target_language_setting(
+    app: AppHandle,
+    language: String,
+) -> Result<(), String> {
+    let language = language.trim().to_string();
+    if language.is_empty() || language == "auto" {
+        return Err("Selected-text translation target language is invalid".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.selected_text_translation_target_language = language;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_translation_mode_setting(app: AppHandle, mode: String) -> Result<(), String> {
     let parsed = match mode.trim() {
         "direct" => TranslationMode::Direct,

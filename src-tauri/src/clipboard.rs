@@ -12,9 +12,24 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(target_os = "linux")]
 use crate::utils::{is_kde_wayland, is_wayland};
 
-const SELECTION_COPY_TIMEOUT: Duration = Duration::from_millis(280);
+// Browser-based editors can publish copied text asynchronously. Give them a
+// full second while still polling quickly enough for native apps to return at
+// their usual near-instant speed.
+const SELECTION_COPY_TIMEOUT: Duration = Duration::from_secs(1);
 const SELECTION_COPY_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SELECTION_COPY_SETTLE_DELAY: Duration = Duration::from_millis(60);
 const MAX_SELECTION_TRANSLATION_CHARS: usize = 12_000;
+
+/// Re-registers global shortcuts on every return path after the synthetic copy
+/// chord. This prevents a user's modifier-only transcription shortcut from
+/// treating Handy's generated Command key as a new recording action.
+struct ShortcutResumeGuard(AppHandle);
+
+impl Drop for ShortcutResumeGuard {
+    fn drop(&mut self) {
+        crate::shortcut::resume_all_shortcuts(&self.0);
+    }
+}
 
 fn selection_text_from_clipboard(
     candidate: &str,
@@ -41,6 +56,13 @@ fn selection_text_from_clipboard(
 /// contents before returning. A temporary sentinel prevents a failed copy from
 /// accidentally translating stale clipboard text.
 pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
+    // The action starts its copy work from the shortcut's release callback.
+    // Temporarily suspend global bindings before generating Command/Ctrl+C so
+    // that chord cannot recursively fire a modifier-only Handy shortcut.
+    crate::shortcut::suspend_all_shortcuts(app_handle);
+    let _shortcut_resume_guard = ShortcutResumeGuard(app_handle.clone());
+    std::thread::sleep(SELECTION_COPY_SETTLE_DELAY);
+
     let clipboard = app_handle.clipboard();
     let saved_text = clipboard.read_text().ok().filter(|text| !text.is_empty());
     let saved_image = if saved_text.is_none() {

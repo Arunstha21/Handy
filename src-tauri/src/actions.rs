@@ -1418,6 +1418,7 @@ impl ShortcutAction for CancelAction {
 /// microphone and always uses the configured text-model translation profile.
 struct SelectedTextTranslationAction {
     in_flight: Arc<AtomicBool>,
+    work_started: Arc<AtomicBool>,
 }
 
 impl ShortcutAction for SelectedTextTranslationAction {
@@ -1427,11 +1428,35 @@ impl ShortcutAction for SelectedTextTranslationAction {
             return;
         }
 
+        self.work_started.store(false, Ordering::Release);
+        let settings = get_settings(app);
+        let target_language = settings
+            .selected_text_translation_target_language
+            .trim()
+            .to_string();
+        let target_label = language_display_name(&target_language);
+
+        // Give immediate visual confirmation on key-down. The copy itself is
+        // deliberately deferred to key-up so the user's modifiers cannot leak
+        // into Handy's synthetic copy chord.
+        utils::show_selected_text_translation_loading(app, &target_label);
+    }
+
+    fn stop(&self, app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
+        if !self.in_flight.load(Ordering::Acquire) || self.work_started.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+
         let app_handle = app.clone();
         let in_flight = Arc::clone(&self.in_flight);
+        let work_started = Arc::clone(&self.work_started);
         std::thread::spawn(move || {
             let settings = get_settings(&app_handle);
-            let target_language = settings.translation_target_language.trim().to_string();
+            let target_language = settings
+                .selected_text_translation_target_language
+                .trim()
+                .to_string();
             let target_label = language_display_name(&target_language);
 
             let result = (|| {
@@ -1443,7 +1468,6 @@ impl ShortcutAction for SelectedTextTranslationAction {
                 }
                 balanced_translation_request(&settings)?;
 
-                utils::show_selected_text_translation_loading(&app_handle, &target_label);
                 let selected = crate::clipboard::capture_selected_text(&app_handle)?;
                 tauri::async_runtime::block_on(translate_with_balanced_profile(
                     &settings,
@@ -1466,12 +1490,9 @@ impl ShortcutAction for SelectedTextTranslationAction {
                 }
             }
 
+            work_started.store(false, Ordering::Release);
             in_flight.store(false, Ordering::Release);
         });
-    }
-
-    fn stop(&self, _app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
-        // This is a press-once action; releasing its shortcut has no effect.
     }
 }
 
@@ -1526,6 +1547,7 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
         "translate_selected_text".to_string(),
         Arc::new(SelectedTextTranslationAction {
             in_flight: Arc::new(AtomicBool::new(false)),
+            work_started: Arc::new(AtomicBool::new(false)),
         }) as Arc<dyn ShortcutAction>,
     );
     map.insert(

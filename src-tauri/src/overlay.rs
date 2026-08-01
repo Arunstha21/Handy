@@ -76,9 +76,9 @@ const SELECTION_TRANSLATION_EDGE_GAP: f64 = 10.0;
 // working/open morph gets clipped at the webview boundary.
 // Webview reserves room for the widest/tallest island state so width morphs
 // (rest → work → open) are not clipped. Visible size is driven by CSS.
-// Compact height ≈ camera safe-area band (single horizontal capsule).
-const OVERLAY_NOTCH_WIDTH: f64 = 400.0;
-const OVERLAY_NOTCH_HEIGHT: f64 = 52.0;
+// Compact notch states can grow a status shelf beneath the camera-safe row.
+const OVERLAY_NOTCH_WIDTH: f64 = 480.0;
+const OVERLAY_NOTCH_HEIGHT: f64 = 80.0;
 const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 520.0;
 const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 148.0;
 

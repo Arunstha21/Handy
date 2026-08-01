@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { SettingsGroup } from "../../ui/SettingsGroup";
 import { ShortcutInput } from "../ShortcutInput";
 import { TranslateToEnglish } from "../TranslateToEnglish";
+import { SelectedTextTranslationTarget } from "../SelectedTextTranslationTarget";
 import { useModelStore } from "../../../stores/modelStore";
 
 /**
@@ -41,6 +42,7 @@ export const TranslationSettingsCard: React.FC = () => {
         descriptionMode="tooltip"
         grouped={true}
       />
+      <SelectedTextTranslationTarget descriptionMode="tooltip" grouped={true} />
       <ShortcutInput
         shortcutId="translate_selected_text"
         descriptionMode="tooltip"

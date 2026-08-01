@@ -119,6 +119,10 @@ const settingUpdaters: {
     commands.changeTranslationModeSetting(value as "direct" | "balanced"),
   translation_target_language: (value) =>
     commands.changeTranslationTargetLanguageSetting(value as string),
+  selected_text_translation_target_language: (value) =>
+    commands.changeSelectedTextTranslationTargetLanguageSetting(
+      value as string,
+    ),
   dual_model_enabled: (value) =>
     commands.changeDualModelEnabledSetting(value as boolean),
   secondary_model_id: (value) =>

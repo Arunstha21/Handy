@@ -416,6 +416,10 @@ pub struct AppSettings {
     pub translation_mode: TranslationMode,
     #[serde(default = "default_translation_target_language")]
     pub translation_target_language: String,
+    /// Dedicated output language for selected-text translation. Keeping this
+    /// separate prevents changing the speech-translation shortcut's target.
+    #[serde(default = "default_selected_text_translation_target_language")]
+    pub selected_text_translation_target_language: String,
     #[serde(default = "default_selected_language")]
     pub selected_language: String,
     #[serde(default = "default_overlay_position")]
@@ -512,7 +516,7 @@ fn default_model() -> String {
     "".to_string()
 }
 
-const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 3;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -531,6 +535,10 @@ fn default_translate_to_english() -> bool {
 }
 
 fn default_translation_target_language() -> String {
+    "en".to_string()
+}
+
+fn default_selected_text_translation_target_language() -> String {
     "en".to_string()
 }
 
@@ -945,6 +953,8 @@ pub fn get_default_settings() -> AppSettings {
         translation_enabled: false,
         translation_mode: TranslationMode::default(),
         translation_target_language: default_translation_target_language(),
+        selected_text_translation_target_language:
+            default_selected_text_translation_target_language(),
         selected_language: "auto".to_string(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
@@ -1166,6 +1176,15 @@ fn apply_settings_migrations(
         updated = true;
     }
 
+    if stored_schema_version < 3 {
+        // Selected-text translation originally shared the speech-translation
+        // target. Preserve that choice once, then let the two controls diverge.
+        settings.selected_text_translation_target_language =
+            settings.translation_target_language.clone();
+        settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+        updated = true;
+    }
+
     // Existing stores predate the balanced cascade. Keep their direct speech
     // translation behavior until the user explicitly chooses a new profile;
     // fresh installs use the balanced default from `get_default_settings()`.
@@ -1383,6 +1402,22 @@ mod tests {
 
         assert!(apply_settings_migrations(&mut settings, &stored));
         assert_eq!(settings.translation_mode, TranslationMode::Direct);
+    }
+
+    #[test]
+    fn selected_text_target_migration_preserves_existing_translation_target() {
+        let stored = serde_json::json!({
+            "settings_schema_version": 2,
+            "translation_target_language": "fr"
+        });
+        let mut settings: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(settings.selected_text_translation_target_language, "fr");
+        assert_eq!(
+            settings.settings_schema_version,
+            CURRENT_SETTINGS_SCHEMA_VERSION
+        );
     }
 
     #[test]

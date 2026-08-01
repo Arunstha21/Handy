@@ -332,7 +332,9 @@ const RecordingOverlay: React.FC = () => {
         </div>
         {housingRail}
         <div className="sbase-r">
-          {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
+          {/* The measured right wing is intentionally compact. Keeping only
+              waveform + cancel here prevents the live timer from colliding
+              with the camera-safe center on narrower notch geometries. */}
           {waveform}
           {showCancel && cancelBtn}
         </div>
@@ -350,21 +352,23 @@ const RecordingOverlay: React.FC = () => {
       </div>
     );
 
-  // Working keeps the housing void empty; status text sits in the right wing.
+  // Working keeps the hardware row quiet: empty left wing, camera void, cancel.
+  // The status sits on its own centered shelf immediately below the housing.
+  // This preserves the same spatial map as recording/live states and keeps every
+  // translated label clear of the physical camera cutout.
   const workingRow = (label: string, showCancel: boolean) =>
     isNotch ? (
-      <div className="sbase">
-        <div className="sbase-l">
-          <span className="sactivity">
-            <span className="sspinner" />
-          </span>
+      <>
+        <div className="sbase">
+          <div className="sbase-l" aria-hidden="true" />
+          {housingRail}
+          <div className="sbase-r">{showCancel && cancelBtn}</div>
         </div>
-        {housingRail}
-        <div className="sbase-r">
-          <span className="swork-label">{label}</span>
-          {showCancel && cancelBtn}
+        <div className="snotch-status" role="status" aria-live="polite">
+          <span className="sspinner" aria-hidden="true" />
+          <span className="snotch-status-label">{label}</span>
         </div>
-      </div>
+      </>
     ) : (
       <div className="sbase">
         <div className="sbase-l">
@@ -439,8 +443,9 @@ const RecordingOverlay: React.FC = () => {
     );
   }
 
-  // ---- Minimal overlay: exactly one row at a time — waveform (recording), or a
-  // spinner + label (transcribing / processing / translating / verifying).
+  // ---- Minimal overlay: one control row for recording. Notch working states
+  // add a compact status shelf beneath it; other placements keep their existing
+  // spinner + label row.
   const working =
     state === "transcribing" ||
     state === "processing" ||

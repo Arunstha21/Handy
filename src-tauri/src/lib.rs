@@ -624,6 +624,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_translate_to_english_setting,
             shortcut::change_translation_enabled_setting,
             shortcut::change_translation_target_language_setting,
+            shortcut::change_selected_text_translation_target_language_setting,
             shortcut::change_translation_mode_setting,
             shortcut::change_dual_model_enabled_setting,
             shortcut::change_secondary_model_setting,

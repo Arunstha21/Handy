@@ -40,14 +40,9 @@
      [ activity ][  housing (empty)  ][ waveform  cancel ] */
   --notch-safe-top: 32px;
   --notch-housing-w: 126px;
-  /* Island height hugs the hardware cutout depth so it sits in the notch band. */
-  --ov-notch-base-h: max(34px, calc(var(--notch-safe-top) - 1px));
-  /* Side rails outside the housing: activity left, waveform+cancel right. */
-  --ov-notch-rail-w: 56px;
-  --ov-notch-rest-w: calc(var(--notch-housing-w) + var(--ov-notch-rail-w) * 2);
-  --ov-notch-pill-w: var(--ov-notch-rest-w);
-  --ov-notch-work-w: calc(var(--notch-housing-w) + 72px + 96px);
-  --ov-notch-open-w: calc(var(--notch-housing-w) + 280px);
+  /* Equal side rails keep the measured camera housing centered on the physical
+     notch. Their widths include the inner insets for activity and controls. */
+  --ov-notch-rail-w: 64px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -87,6 +82,16 @@
   align-items: flex-start; /* top placement: flush to the top edge */
 }
 .ov-stage.notch {
+  /* Derive these on the same element that receives AppKit's measured custom
+     properties. Defining them on :root would resolve against the fallback
+     housing size before the per-display values can inherit. */
+  /* AppKit reports the physical camera-safe band in logical points. Matching
+     that value exactly avoids the 3-4px lip that appeared below the notch on
+     shallower MacBook panels. */
+  --ov-notch-base-h: var(--notch-safe-top);
+  --ov-notch-rest-w: calc(var(--notch-housing-w) + var(--ov-notch-rail-w) * 2);
+  --ov-notch-pill-w: var(--ov-notch-rest-w);
+  --ov-notch-open-w: calc(var(--notch-housing-w) + 280px);
   align-items: flex-start;
   box-sizing: border-box;
   /* Flush to the display top — one capsule sits in the notch band. */
@@ -139,6 +144,9 @@
   padding-bottom: 12px;
   -webkit-mask-image: none;
   mask-image: none;
+}
+.ov-stage.notch .stext-cap .tentative {
+  color: rgb(245 245 247 / 68%);
 }
 .ov-stage.notch .stext-cap.overflowing {
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
@@ -266,8 +274,10 @@
 }
 .ov-stage.notch .scard.working,
 .ov-stage.notch .scard.compact.cworking {
-  width: var(--ov-notch-work-w);
-  border-radius: 9999px;
+  width: var(--ov-notch-rest-w);
+  /* Working grows downward from the hardware row instead of widening into the
+     menu-bar rails. The flatter top visually joins the physical housing. */
+  border-radius: 0 0 22px 22px;
 }
 .ov-stage.notch .scard.compact {
   width: var(--ov-notch-rest-w);
@@ -288,7 +298,7 @@
 .ov-stage.notch .sbase {
   height: var(--ov-notch-base-h);
   min-height: var(--ov-notch-base-h);
-  padding: 0 10px;
+  padding: 0;
   display: grid;
   grid-template-columns:
     minmax(var(--ov-notch-rail-w), 1fr)
@@ -301,7 +311,8 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding-left: 2px;
+  box-sizing: border-box;
+  padding-left: 12px;
   min-width: 0;
 }
 .ov-stage.notch .sbase-r {
@@ -309,6 +320,8 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  box-sizing: border-box;
+  padding-right: 10px;
   min-width: 0;
 }
 
@@ -345,18 +358,52 @@
   border-top-color: #f5f5f7;
 }
 
-/* Working labels live in the right wing (never over the camera). */
-.ov-stage.notch .swork-label {
+/* Working status shelf — centered below the camera housing, never beside or
+   behind it. The quiet divider and one spinner are the only moving feedback. */
+.ov-stage.notch .snotch-status {
+  position: relative;
+  display: flex;
+  min-height: 28px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 1px 14px 9px;
+  color: #f5f5f7;
+}
+.ov-stage.notch .snotch-status::before {
+  position: absolute;
+  top: 0;
+  right: 16px;
+  left: 16px;
+  height: 1px;
+  content: "";
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 10%) 24%,
+    rgb(255 255 255 / 10%) 76%,
+    transparent
+  );
+}
+.ov-stage.notch .snotch-status .sspinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+  border-color: rgb(255 255 255 / 22%);
+  border-top-color: #f5f5f7;
+}
+.ov-stage.notch .snotch-status-label {
+  min-width: 0;
+  overflow: hidden;
   color: #f5f5f7;
   font-size: 11px;
   font-weight: 500;
+  line-height: 16px;
   letter-spacing: -0.01em;
-  padding: 0;
-  max-width: 120px;
-}
-.ov-stage.notch .scard.working .swork-label,
-.ov-stage.notch .scard.compact.cworking .swork-label {
-  max-width: 140px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Right-side vertical waveform rails (reference island audio glyph). */
@@ -414,6 +461,7 @@
   min-height: 0;
 }
 .stext-cap {
+  box-sizing: border-box;
   max-height: var(--ov-cap-max-h);
   overflow-y: auto;
   overscroll-behavior: contain;
