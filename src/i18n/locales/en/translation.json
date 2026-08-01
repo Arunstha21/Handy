@@ -296,8 +296,8 @@
           "description": "Where the overlay appears on screen during recording and transcription.",
           "options": {
             "bottom": "Bottom",
-        "top": "Top",
-        "notch": "Notch"
+            "top": "Top",
+            "notch": "Notch"
           }
         }
       },
@@ -343,6 +343,12 @@
       "translateToEnglish": {
         "label": "Translate to English",
         "description": "Automatically translate speech from other languages to English during transcription."
+      },
+      "translation": {
+        "label": "Enable translation mode",
+        "description": "Enable a separate shortcut that translates speech into a selected language.",
+        "targetLabel": "Translation target",
+        "targetDescription": "Choose the language produced by the translation shortcut."
       },
       "modelUnload": {
         "title": "Unload Model",

@@ -387,6 +387,12 @@ pub struct AppSettings {
     pub selected_output_device: Option<String>,
     #[serde(default = "default_translate_to_english")]
     pub translate_to_english: bool,
+    /// Enables the dedicated translation action. This is intentionally separate
+    /// from source-language selection and from ordinary transcription.
+    #[serde(default)]
+    pub translation_enabled: bool,
+    #[serde(default = "default_translation_target_language")]
+    pub translation_target_language: String,
     #[serde(default = "default_selected_language")]
     pub selected_language: String,
     #[serde(default = "default_overlay_position")]
@@ -479,7 +485,7 @@ fn default_model() -> String {
     "".to_string()
 }
 
-const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -495,6 +501,10 @@ fn default_always_on_microphone() -> bool {
 
 fn default_translate_to_english() -> bool {
     false
+}
+
+fn default_translation_target_language() -> String {
+    "en".to_string()
 }
 
 fn default_start_hidden() -> bool {
@@ -834,6 +844,25 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: default_post_process_shortcut.to_string(),
         },
     );
+    #[cfg(target_os = "windows")]
+    let default_translation_shortcut = "ctrl+alt+space";
+    #[cfg(target_os = "macos")]
+    let default_translation_shortcut = "option+control+space";
+    #[cfg(target_os = "linux")]
+    let default_translation_shortcut = "ctrl+alt+space";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let default_translation_shortcut = "alt+ctrl+space";
+
+    bindings.insert(
+        "transcribe_with_translation".to_string(),
+        ShortcutBinding {
+            id: "transcribe_with_translation".to_string(),
+            name: "Translate Speech".to_string(),
+            description: "Translates your speech into the selected target language.".to_string(),
+            default_binding: default_translation_shortcut.to_string(),
+            current_binding: default_translation_shortcut.to_string(),
+        },
+    );
     bindings.insert(
         "cancel".to_string(),
         ShortcutBinding {
@@ -864,6 +893,8 @@ pub fn get_default_settings() -> AppSettings {
         clamshell_microphone: None,
         selected_output_device: None,
         translate_to_english: false,
+        translation_enabled: false,
+        translation_target_language: default_translation_target_language(),
         selected_language: "auto".to_string(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
@@ -1072,6 +1103,18 @@ fn apply_settings_migrations(
         updated = true;
     }
 
+    if stored_schema_version < 2 {
+        // The dedicated translation action supersedes the old global toggle.
+        // Preserve an existing X->English preference as the initial target;
+        // ordinary transcription remains the default for new users.
+        if settings.translate_to_english {
+            settings.translation_enabled = true;
+            settings.translation_target_language = "en".to_string();
+        }
+        settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+        updated = true;
+    }
+
     // One-time overlay migration (only while the new key is absent): the retired
     // overlay_position `none` meant "hide the overlay" → OverlayStyle::None; any
     // other position had it visible → Live. The position enum no longer has a
@@ -1259,8 +1302,14 @@ mod tests {
         assert_eq!(settings.log_level, LogLevel::Debug);
         assert_eq!(settings.sound_theme, SoundTheme::Pop);
 
-        // A current-format store must not be rewritten on every read.
-        assert!(!apply_settings_migrations(&mut settings, &stored));
+        // The v0.9 store predates the dedicated translation settings and must
+        // receive the one-time schema migration exactly once.
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(
+            settings.settings_schema_version,
+            CURRENT_SETTINGS_SCHEMA_VERSION
+        );
+        assert!(!settings.translation_enabled);
     }
 
     #[test]

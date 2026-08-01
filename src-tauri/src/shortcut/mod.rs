@@ -619,6 +619,31 @@ pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Res
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_translation_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.translation_enabled = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_translation_target_language_setting(
+    app: AppHandle,
+    language: String,
+) -> Result<(), String> {
+    let language = language.trim().to_string();
+    if language.is_empty() {
+        return Err("Translation target language cannot be empty".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.translation_target_language = language;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.selected_language = language;

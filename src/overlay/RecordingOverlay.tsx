@@ -35,7 +35,9 @@ const RecordingOverlay: React.FC = () => {
   const [session, setSession] = useState(0);
   // Overlay placement. The Live panel grows downward from Top/Notch and upward
   // from Bottom.
-  const [position, setPosition] = useState<"top" | "bottom" | "notch">("bottom");
+  const [position, setPosition] = useState<"top" | "bottom" | "notch">(
+    "bottom",
+  );
   // True once live text overflows the cap. A top overlay fades its top edge only
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);

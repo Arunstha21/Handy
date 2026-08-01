@@ -5,8 +5,7 @@ use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::model::ModelManager;
-use crate::managers::transcription::StreamWorkKind;
-use crate::managers::transcription::TranscriptionManager;
+use crate::managers::transcription::{StreamWorkKind, TranscriptionManager, TranscriptionTask};
 use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
@@ -52,6 +51,7 @@ pub trait ShortcutAction: Send + Sync {
 // Transcribe Action
 struct TranscribeAction {
     post_process: bool,
+    translation: bool,
 }
 
 /// Field name for structured output JSON schema
@@ -466,6 +466,41 @@ impl ShortcutAction for TranscribeAction {
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
 
+        let settings = get_settings(app);
+        let selected_model_info = app
+            .state::<Arc<ModelManager>>()
+            .get_model_info(&settings.selected_model);
+
+        if self.translation {
+            let target_language = settings.translation_target_language.trim();
+            let target_supported = selected_model_info.as_ref().is_some_and(|model| {
+                model.supported_languages.iter().any(|language| {
+                    language == target_language
+                        || language.split('-').next() == target_language.split('-').next()
+                })
+            });
+            if !settings.translation_enabled {
+                let _ = app.emit(
+                    "transcription-error",
+                    "Translation mode is disabled. Enable it in model settings first.",
+                );
+                return;
+            }
+            if selected_model_info
+                .as_ref()
+                .is_none_or(|model| !model.supports_translation || !target_supported)
+            {
+                let _ = app.emit(
+                    "transcription-error",
+                    format!(
+                        "The selected model cannot translate to '{}'. Choose a supported target language.",
+                        target_language
+                    ),
+                );
+                return;
+            }
+        }
+
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
         let rm = app.state::<Arc<AudioRecordingManager>>();
@@ -488,20 +523,16 @@ impl ShortcutAction for TranscribeAction {
 
         // Get the microphone mode to determine audio feedback timing
         let plan_started = Instant::now();
-        let settings = get_settings(app);
         let is_always_on = settings.always_on_microphone;
-
-        let selected_model_info = app
-            .state::<Arc<ModelManager>>()
-            .get_model_info(&settings.selected_model);
 
         // Use the app-facing model capability as the single pre-recording source
         // for live streaming decisions. Unknown support is represented as false
         // until the model registry is updated by discovery or runtime load.
-        let model_supports_streaming = selected_model_info
-            .as_ref()
-            .map(|m| m.supports_streaming)
-            .unwrap_or(false);
+        let model_supports_streaming = (!self.translation)
+            && selected_model_info
+                .as_ref()
+                .map(|m| m.supports_streaming)
+                .unwrap_or(false);
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if model_supports_streaming {
@@ -646,6 +677,8 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
+        let translation = self.translation;
+        let translation_target = get_settings(app).translation_target_language;
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -693,6 +726,13 @@ impl ShortcutAction for TranscribeAction {
                     // running, finalize it and use its text (all audio was already
                     // fed to the stream); otherwise batch-transcribe the samples.
                     let transcription_time = Instant::now();
+                    let transcription_task = if translation {
+                        TranscriptionTask::Translate {
+                            target_language: translation_target.clone(),
+                        }
+                    } else {
+                        TranscriptionTask::Transcribe
+                    };
                     let transcription_result = match tm.finalize_stream() {
                         // A finalized stream with usable text wins. An empty result
                         // (no active stream, produced nothing, or a finalize error
@@ -700,8 +740,8 @@ impl ShortcutAction for TranscribeAction {
                         // transcription of the same audio. A finalize timeout is
                         // surfaced instead — the worker may still hold the engine,
                         // so a batch fallback would contend with it.
-                        Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
-                        Ok(_) => tm.transcribe(samples),
+                        Ok(Some(text)) if !translation && !text.trim().is_empty() => Ok(text),
+                        Ok(_) => tm.transcribe_with_task(samples, transcription_task),
                         Err(err) => Err(err),
                     };
 
@@ -909,11 +949,22 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
         "transcribe".to_string(),
         Arc::new(TranscribeAction {
             post_process: false,
+            translation: false,
         }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "transcribe_with_post_process".to_string(),
-        Arc::new(TranscribeAction { post_process: true }) as Arc<dyn ShortcutAction>,
+        Arc::new(TranscribeAction {
+            post_process: true,
+            translation: false,
+        }) as Arc<dyn ShortcutAction>,
+    );
+    map.insert(
+        "transcribe_with_translation".to_string(),
+        Arc::new(TranscribeAction {
+            post_process: false,
+            translation: true,
+        }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "cancel".to_string(),

@@ -22,7 +22,7 @@ use transcribe_cpp::{
 };
 use transcribe_rs::{
     onnx::{
-        canary::CanaryModel,
+        canary::{CanaryModel, CanaryParams},
         cohere::CohereModel,
         gigaam::GigaAMModel,
         moonshine::{MoonshineModel, MoonshineVariant, StreamingModel},
@@ -81,6 +81,15 @@ pub enum StreamPhase {
 pub enum StreamWorkKind {
     Transcribing,
     Polishing,
+}
+
+/// Immutable output intent captured for one recording. Keeping this separate
+/// from persisted settings prevents a user changing a setting mid-recording
+/// from changing the task that is already in flight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TranscriptionTask {
+    Transcribe,
+    Translate { target_language: String },
 }
 
 /// Emitted to switch the streaming overlay to a working spinner.
@@ -894,8 +903,15 @@ impl TranscriptionManager {
         let settings = get_settings(&self.app_handle);
         let effective_language =
             effective_language_for_model(&settings, self.model_manager.as_ref(), &model_id);
+        let stream_task = if settings.translate_to_english {
+            TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            }
+        } else {
+            TranscriptionTask::Transcribe
+        };
         let run_plan = transcribe_cpp_run_plan(
-            settings.translate_to_english,
+            &stream_task,
             &effective_language,
             &languages,
             supports_translate,
@@ -1110,6 +1126,18 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        let settings = get_settings(&self.app_handle);
+        let task = if settings.translate_to_english {
+            TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            }
+        } else {
+            TranscriptionTask::Transcribe
+        };
+        self.transcribe_with_task(audio, task)
+    }
+
+    pub fn transcribe_with_task(&self, audio: Vec<f32>, task: TranscriptionTask) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
@@ -1246,7 +1274,7 @@ impl TranscriptionManager {
                         };
 
                         let run_plan = transcribe_cpp_run_plan(
-                            settings.translate_to_english,
+                            &task,
                             &validated_language,
                             &model_languages,
                             model_supports_translate,
@@ -1322,13 +1350,19 @@ impl TranscriptionManager {
                         } else {
                             Some(validated_language.clone())
                         };
-                        let options = TranscribeOptions {
+                        let target_language = match &task {
+                            TranscriptionTask::Translate { target_language } => {
+                                Some(normalize_cjk_language(target_language).to_string())
+                            }
+                            TranscriptionTask::Transcribe => None,
+                        };
+                        let options = CanaryParams {
                             language: lang,
-                            translate: settings.translate_to_english,
+                            target_language,
                             ..Default::default()
                         };
                         canary_engine
-                            .transcribe(&audio, &options)
+                            .transcribe_with(&audio, &options)
                             .map(|r| r.text)
                             .map_err(|e| anyhow::anyhow!("Canary transcription failed: {}", e))
                     }
@@ -1401,7 +1435,7 @@ impl TranscriptionManager {
         let filtered_result = post_process_transcription_text(result, &settings, model_is_whisper);
 
         let et = std::time::Instant::now();
-        let translation_note = if settings.translate_to_english {
+        let translation_note = if matches!(task, TranscriptionTask::Translate { .. }) {
             " (translated)"
         } else {
             ""
@@ -1578,7 +1612,7 @@ struct TranscribeCppRunPlan {
 /// Build the transcribe-cpp language/task options shared by batch and live
 /// streaming paths.
 fn transcribe_cpp_run_plan(
-    translate_to_english: bool,
+    task: &TranscriptionTask,
     effective_language: &str,
     model_languages: &[String],
     model_supports_translate: bool,
@@ -1592,11 +1626,8 @@ fn transcribe_cpp_run_plan(
     // UNSUPPORTED_LANGUAGE. Language-agnostic models report an empty list, so
     // they always stay on auto.
     let language = requested_language.filter(|lang| model_languages.iter().any(|l| l == lang));
-    let (task, target_language) = cpp_translation_task(
-        translate_to_english,
-        model_supports_translate,
-        language.as_deref(),
-    );
+    let (task, target_language) =
+        cpp_translation_task(task, model_supports_translate, language.as_deref());
 
     TranscribeCppRunPlan {
         task,
@@ -1661,14 +1692,16 @@ where
 ///
 /// Returns `(task, target_language)` ready to drop into `RunOptions`.
 fn cpp_translation_task(
-    translate_to_english: bool,
+    requested_task: &TranscriptionTask,
     model_supports_translate: bool,
     source_language: Option<&str>,
 ) -> (Task, Option<String>) {
-    let translate_to_en =
-        translate_to_english && model_supports_translate && source_language != Some("en");
-    if translate_to_en {
-        (Task::Translate, Some("en".to_string()))
+    let TranscriptionTask::Translate { target_language } = requested_task else {
+        return (Task::Transcribe, None);
+    };
+    let target_language = normalize_cjk_language(target_language);
+    if model_supports_translate && source_language != Some(target_language) {
+        (Task::Translate, Some(target_language.to_string()))
     } else {
         (Task::Transcribe, None)
     }
@@ -2025,7 +2058,12 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_maps_chinese_variants() {
-        let plan = transcribe_cpp_run_plan(false, "zh-Hant", &languages(&["zh"]), true);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Transcribe,
+            "zh-Hant",
+            &languages(&["zh"]),
+            true,
+        );
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("zh"));
@@ -2034,7 +2072,14 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_skips_english_translation() {
-        let plan = transcribe_cpp_run_plan(true, "en", &languages(&["en", "es"]), true);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            },
+            "en",
+            &languages(&["en", "es"]),
+            true,
+        );
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("en"));
@@ -2043,7 +2088,14 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_translates_supported_non_english() {
-        let plan = transcribe_cpp_run_plan(true, "es", &languages(&["en", "es"]), true);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            },
+            "es",
+            &languages(&["en", "es"]),
+            true,
+        );
 
         assert!(matches!(plan.task, Task::Translate));
         assert_eq!(plan.language.as_deref(), Some("es"));
@@ -2052,7 +2104,14 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_requires_model_translation_support() {
-        let plan = transcribe_cpp_run_plan(true, "es", &languages(&["en", "es"]), false);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            },
+            "es",
+            &languages(&["en", "es"]),
+            false,
+        );
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("es"));
