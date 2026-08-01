@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import "./SelectionTranslationOverlay.css";
 
@@ -45,6 +45,10 @@ const SelectionTranslationOverlay: React.FC = () => {
         return;
       }
       unlistenHide = stopHide;
+
+      if (!cancelled) {
+        await emit("selection-translation-ready");
+      }
     };
 
     void setupListeners();

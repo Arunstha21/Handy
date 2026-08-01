@@ -1,12 +1,13 @@
 use crate::input;
 use crate::settings;
 use crate::settings::{OverlayPosition, OverlayStyle};
+use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, PhysicalSize};
 
-#[cfg(not(target_os = "macos"))]
-use log::debug;
+use log::{debug, error};
 
 #[cfg(not(target_os = "macos"))]
 use tauri::WebviewWindowBuilder;
@@ -688,6 +689,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
 /// Creates the non-activating selected-text translation overlay (non-macOS).
 #[cfg(not(target_os = "macos"))]
 pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
+    register_selection_translation_overlay_ready_listener(app_handle);
     let (width, height) = (
         SELECTION_TRANSLATION_OVERLAY_WIDTH,
         SELECTION_TRANSLATION_OVERLAY_HEIGHT,
@@ -727,6 +729,7 @@ pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
 /// Creates the non-activating selected-text translation panel (macOS).
 #[cfg(target_os = "macos")]
 pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
+    register_selection_translation_overlay_ready_listener(app_handle);
     let width = SELECTION_TRANSLATION_OVERLAY_WIDTH;
     let height = SELECTION_TRANSLATION_OVERLAY_HEIGHT;
     let (x, y) = calculate_selection_translation_overlay_position(app_handle, width, height)
@@ -755,7 +758,10 @@ pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
     )
     .build()
     {
-        Ok(panel) => panel.hide(),
+        Ok(panel) => {
+            panel.hide();
+            debug!("Selected-text translation overlay panel created (hidden)");
+        }
         Err(error) => log::error!("Failed to create selected-text translation panel: {error}"),
     }
 }
@@ -1004,6 +1010,165 @@ struct SelectionTranslationPresentation {
     text: Option<String>,
 }
 
+#[derive(Clone)]
+struct PendingSelectionTranslationPresentation {
+    presentation: SelectionTranslationPresentation,
+    reposition: bool,
+    generation: u64,
+}
+
+// A hidden WebView may not have attached its frontend event listeners when the
+// first shortcut is pressed. Keep the newest state until that WebView explicitly
+// reports readiness, then replay it. This also recovers if the overlay WebView
+// reloads while a translation is in flight.
+static SELECTION_TRANSLATION_READY: AtomicBool = AtomicBool::new(false);
+static PENDING_SELECTION_TRANSLATION_PRESENTATION: Lazy<
+    Mutex<Option<PendingSelectionTranslationPresentation>>,
+> = Lazy::new(|| Mutex::new(None));
+
+fn remember_selection_translation_presentation(
+    presentation: PendingSelectionTranslationPresentation,
+) {
+    match PENDING_SELECTION_TRANSLATION_PRESENTATION.lock() {
+        Ok(mut pending) => *pending = Some(presentation),
+        Err(lock_error) => {
+            error!("Could not retain selected-text translation presentation: {lock_error}")
+        }
+    }
+}
+
+fn pending_selection_translation_presentation() -> Option<PendingSelectionTranslationPresentation> {
+    match PENDING_SELECTION_TRANSLATION_PRESENTATION.lock() {
+        Ok(pending) => pending.clone(),
+        Err(lock_error) => {
+            error!("Could not read selected-text translation presentation: {lock_error}");
+            None
+        }
+    }
+}
+
+fn clear_selection_translation_presentation(generation: u64) {
+    match PENDING_SELECTION_TRANSLATION_PRESENTATION.lock() {
+        Ok(mut pending) => {
+            if pending
+                .as_ref()
+                .is_some_and(|presentation| presentation.generation == generation)
+            {
+                *pending = None;
+            }
+        }
+        Err(lock_error) => {
+            error!("Could not clear selected-text translation presentation: {lock_error}")
+        }
+    }
+}
+
+fn register_selection_translation_overlay_ready_listener(app_handle: &AppHandle) {
+    let replay_handle = app_handle.clone();
+    app_handle.listen("selection-translation-ready", move |_| {
+        SELECTION_TRANSLATION_READY.store(true, Ordering::Release);
+        debug!("Selected-text translation overlay frontend is ready");
+        if let Some(presentation) = pending_selection_translation_presentation() {
+            present_selection_translation(&replay_handle, presentation);
+        }
+    });
+}
+
+fn present_selection_translation(
+    app_handle: &AppHandle,
+    pending: PendingSelectionTranslationPresentation,
+) {
+    let handle = app_handle.clone();
+    if let Err(schedule_error) = app_handle.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("selection_translation_overlay") else {
+            error!("Selected-text translation overlay window is unavailable");
+            return;
+        };
+
+        if pending.reposition {
+            if let Some((x, y)) = calculate_selection_translation_overlay_position(
+                &handle,
+                SELECTION_TRANSLATION_OVERLAY_WIDTH,
+                SELECTION_TRANSLATION_OVERLAY_HEIGHT,
+            ) {
+                if let Err(position_error) =
+                    window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+                {
+                    error!(
+                        "Could not position selected-text translation overlay: {position_error}"
+                    );
+                }
+            }
+        }
+
+        // Show first so an initially hidden WebView has a chance to finish
+        // loading. The ready callback below replays this state if the event
+        // listener was not attached yet.
+        if let Err(show_error) = window.show() {
+            error!("Could not show selected-text translation overlay: {show_error}");
+            return;
+        }
+
+        if SELECTION_TRANSLATION_READY.load(Ordering::Acquire) {
+            if let Err(emit_error) = window.emit("show-selection-translation", pending.presentation)
+            {
+                error!("Could not update selected-text translation overlay: {emit_error}");
+            }
+        } else {
+            debug!("Selected-text translation overlay is waiting for frontend readiness");
+        }
+    }) {
+        error!("Could not schedule selected-text translation overlay: {schedule_error}");
+    }
+}
+
+fn dismiss_selection_translation_after(
+    app_handle: &AppHandle,
+    generation: u64,
+    delay: std::time::Duration,
+) {
+    let dismiss_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        if SELECTION_TRANSLATION_GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+
+        clear_selection_translation_presentation(generation);
+        let hide_event_handle = dismiss_handle.clone();
+        if let Err(schedule_error) = dismiss_handle.run_on_main_thread(move || {
+            let Some(window) =
+                hide_event_handle.get_webview_window("selection_translation_overlay")
+            else {
+                error!("Selected-text translation overlay window is unavailable during dismissal");
+                return;
+            };
+            if let Err(emit_error) = window.emit("hide-selection-translation", ()) {
+                error!("Could not hide selected-text translation overlay content: {emit_error}");
+            }
+        }) {
+            error!("Could not schedule selected-text translation dismissal: {schedule_error}");
+            return;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(180));
+        let hide_window_handle = dismiss_handle.clone();
+        if let Err(schedule_error) = dismiss_handle.run_on_main_thread(move || {
+            let Some(window) =
+                hide_window_handle.get_webview_window("selection_translation_overlay")
+            else {
+                error!("Selected-text translation overlay window is unavailable while hiding");
+                return;
+            };
+            if let Err(hide_error) = window.hide() {
+                error!("Could not hide selected-text translation overlay: {hide_error}");
+            }
+        }) {
+            error!("Could not schedule selected-text translation hide: {schedule_error}");
+        }
+    });
+}
+
 fn show_selected_text_translation(
     app_handle: &AppHandle,
     state: &str,
@@ -1021,38 +1186,17 @@ fn show_selected_text_translation(
     // this, a completed earlier translation could hide a newer loading/result
     // card while it is still active.
     let generation = SELECTION_TRANSLATION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    let handle = app_handle.clone();
-    let _ = app_handle.run_on_main_thread(move || {
-        let Some(window) = handle.get_webview_window("selection_translation_overlay") else {
-            return;
-        };
+    let pending = PendingSelectionTranslationPresentation {
+        presentation,
+        reposition,
+        generation,
+    };
+    remember_selection_translation_presentation(pending.clone());
+    present_selection_translation(app_handle, pending);
 
-        if reposition {
-            if let Some((x, y)) = calculate_selection_translation_overlay_position(
-                &handle,
-                SELECTION_TRANSLATION_OVERLAY_WIDTH,
-                SELECTION_TRANSLATION_OVERLAY_HEIGHT,
-            ) {
-                let _ =
-                    window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
-            }
-        }
-
-        let _ = window.emit("show-selection-translation", presentation);
-        let _ = window.show();
-
-        if let Some(delay) = dismiss_after {
-            let window_clone = window.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                if SELECTION_TRANSLATION_GENERATION.load(Ordering::Acquire) == generation {
-                    let _ = window_clone.emit("hide-selection-translation", ());
-                    std::thread::sleep(std::time::Duration::from_millis(180));
-                    let _ = window_clone.hide();
-                }
-            });
-        }
-    });
+    if let Some(delay) = dismiss_after {
+        dismiss_selection_translation_after(app_handle, generation, delay);
+    }
 }
 
 /// Shows immediate feedback while Handy safely copies and translates the selection.
