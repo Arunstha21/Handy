@@ -110,6 +110,10 @@ pub struct PostProcessProvider {
 #[serde(rename_all = "lowercase")]
 pub enum OverlayPosition {
     Top,
+    /// Attach the overlay to the camera housing on a notched macOS display.
+    /// Non-macOS platforms and displays without a notch fall back to `Top` at
+    /// placement time while preserving this user preference.
+    Notch,
     // `none` is retired: overlay visibility is owned by `OverlayStyle` now. The
     // alias keeps legacy stores (`"overlay_position": "none"`) deserializing
     // instead of failing the whole load; the one-time overlay migration reads the

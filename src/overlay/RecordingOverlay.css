@@ -71,6 +71,9 @@
 .ov-stage.top {
   align-items: flex-start; /* top placement: flush to the top edge */
 }
+.ov-stage.notch {
+  align-items: flex-start; /* notch placement is anchored below the housing */
+}
 
 /* Compact pill: fade the whole container in/out (the pill itself never pops or
    morphs). */
@@ -92,6 +95,14 @@
   flex-direction: column-reverse;
   transform-origin: top center;
 }
+.ov-stage.notch .scard {
+  /* The native window begins at the bottom edge of the camera housing. Keep
+     the same downward growth and visual attachment as a Top overlay. */
+  flex-direction: column-reverse;
+  transform-origin: top center;
+  border-top-left-radius: 10px;
+  border-top-right-radius: 10px;
+}
 .ov-stage.top .stext-cap {
   /* Mirror of the bottom overlay (top: 12 / bottom: 0): the first line sits flush
      under the pill and the breathing room moves below the text. The top fade is
@@ -101,6 +112,16 @@
   padding-bottom: 12px;
   -webkit-mask-image: none;
   mask-image: none;
+}
+.ov-stage.notch .stext-cap {
+  padding-top: 0;
+  padding-bottom: 12px;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+.ov-stage.notch .stext-cap.overflowing {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
 }
 /* Once live text overflows, fade older lines up under the pill, matching the
    bottom overlay's top fade. Gated on `.overflowing` so a short resting line

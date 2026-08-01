@@ -635,6 +635,7 @@ pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Resu
         // onto Bottom rather than warn.
         "none" | "bottom" => OverlayPosition::Bottom,
         "top" => OverlayPosition::Top,
+        "notch" => OverlayPosition::Notch,
         other => {
             warn!("Invalid overlay position '{}', defaulting to bottom", other);
             OverlayPosition::Bottom

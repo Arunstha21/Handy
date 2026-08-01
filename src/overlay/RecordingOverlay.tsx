@@ -33,9 +33,9 @@ const RecordingOverlay: React.FC = () => {
   // Bumped on each new streaming session so the Live card remounts fresh (replays
   // the pop-in, and never animates in from the previous panel's open size).
   const [session, setSession] = useState(0);
-  // Overlay placement (top vs bottom of the screen). The Live panel grows downward
-  // from a top overlay (oldest line under the pill) and upward from a bottom one.
-  const [position, setPosition] = useState<"top" | "bottom">("bottom");
+  // Overlay placement. The Live panel grows downward from Top/Notch and upward
+  // from Bottom.
+  const [position, setPosition] = useState<"top" | "bottom" | "notch">("bottom");
   // True once live text overflows the cap. A top overlay fades its top edge only
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
@@ -57,8 +57,11 @@ const RecordingOverlay: React.FC = () => {
         try {
           const settings = await commands.getAppSettings();
           if (settings.status === "ok") {
+            const configuredPosition = settings.data.overlay_position;
             setPosition(
-              settings.data.overlay_position === "top" ? "top" : "bottom",
+              configuredPosition === "top" || configuredPosition === "notch"
+                ? configuredPosition
+                : "bottom",
             );
           }
         } catch {

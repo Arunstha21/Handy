@@ -296,7 +296,8 @@
           "description": "Where the overlay appears on screen during recording and transcription.",
           "options": {
             "bottom": "Bottom",
-            "top": "Top"
+        "top": "Top",
+        "notch": "Notch"
           }
         }
       },

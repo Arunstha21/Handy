@@ -17,6 +17,11 @@ use tauri::WebviewUrl;
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelBuilder, PanelLevel, StyleMask};
 
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker as ObjcMainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSScreen;
+
 #[cfg(target_os = "linux")]
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
@@ -88,6 +93,13 @@ fn update_gtk_layer_shell_anchors(overlay_window: &tauri::webview::WebviewWindow
                 OverlayPosition::Bottom => {
                     gtk_window.set_anchor(Edge::Bottom, true);
                     gtk_window.set_anchor(Edge::Top, false);
+                }
+                OverlayPosition::Notch => {
+                    // Layer-shell has no portable camera-housing primitive.
+                    // Keep the preference, but place it at the top edge on
+                    // Linux rather than silently disabling the overlay.
+                    gtk_window.set_anchor(Edge::Top, true);
+                    gtk_window.set_anchor(Edge::Bottom, false);
                 }
             }
         }
@@ -222,6 +234,44 @@ fn is_mouse_within_monitor(
         && mouse_y < (monitor_y + monitor_height as i32)
 }
 
+/// Returns the top safe-area inset for the monitor containing the cursor.
+///
+/// NSScreen exposes the camera-housing exclusion as a safe-area inset. The
+/// Tauri monitor already gives us the matching logical origin, so only the
+/// inset is needed to place the card immediately below the housing. Matching
+/// by backing-scaled frame size keeps this correct when several displays are
+/// attached and the cursor moves between them.
+#[cfg(target_os = "macos")]
+fn macos_notch_inset(monitor: &tauri::Monitor) -> Option<f64> {
+    let marker = ObjcMainThreadMarker::new()?;
+    let screens = NSScreen::screens(marker);
+    let monitor_size = monitor.size();
+
+    let mut best: Option<(f64, f64)> = None;
+    for index in 0..screens.count() {
+        let screen = screens.objectAtIndex(index);
+        let scale = screen.backingScaleFactor() as f64;
+        let frame = screen.frame();
+        let width = (frame.size.width as f64 * scale).round();
+        let height = (frame.size.height as f64 * scale).round();
+        let dw = (width - monitor_size.width as f64).abs();
+        let dh = (height - monitor_size.height as f64).abs();
+        let distance = dw + dh;
+        let inset = screen.safeAreaInsets().top as f64;
+
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, inset));
+        }
+    }
+
+    let (distance, inset) = best?;
+    // A loose tolerance accommodates AppKit/Tauri rounding at scaled
+    // resolutions, while preventing an external display from inheriting the
+    // MacBook's notch inset.
+    let tolerance = 8.0 * monitor.scale_factor();
+    (distance <= tolerance && inset > 0.0).then_some(inset)
+}
+
 /// Returns overlay position in logical coordinates (points on macOS).
 ///
 /// The Bottom anchor uses the macOS work area (visibleFrame) so the overlay
@@ -251,6 +301,18 @@ fn calculate_overlay_position(
     let x = monitor_x + (monitor_width - width) / 2.0;
     let y = match settings.overlay_position {
         OverlayPosition::Top => monitor_y + OVERLAY_TOP_OFFSET,
+        OverlayPosition::Notch => {
+            #[cfg(target_os = "macos")]
+            {
+                macos_notch_inset(&monitor)
+                    .map(|inset| monitor_y + inset)
+                    .unwrap_or(monitor_y + OVERLAY_TOP_OFFSET)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                monitor_y + OVERLAY_TOP_OFFSET
+            }
+        }
         OverlayPosition::Bottom => {
             // work_area.position shares monitor.position's global coordinate
             // space, so no monitor offset is added.
@@ -297,7 +359,7 @@ fn windows_overlay_bounds(
     let x = (monitor_position.x as f64 + (monitor_size.width as f64 - width as f64) / 2.0).round()
         as i32;
     let y = match overlay_position {
-        OverlayPosition::Top => {
+        OverlayPosition::Top | OverlayPosition::Notch => {
             (monitor_position.y as f64 + OVERLAY_TOP_OFFSET * scale).round() as i32
         }
         OverlayPosition::Bottom => (monitor_position.y as f64 + monitor_size.height as f64
