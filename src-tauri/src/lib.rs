@@ -345,6 +345,9 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     // Create the recording overlay window (hidden by default)
     utils::create_recording_overlay(app_handle);
+    // This non-activating overlay is independent from recording visibility so
+    // selected-text translation can work even when the recording overlay is off.
+    utils::create_selection_translation_overlay(app_handle);
 }
 
 #[tauri::command]

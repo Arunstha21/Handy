@@ -176,6 +176,10 @@
             "name": "Translate Speech Shortcut",
             "description": "The keyboard shortcut to record your speech and translate it into the selected target language."
           },
+          "translate_selected_text": {
+            "name": "Translate Selected Text Shortcut",
+            "description": "Copies the selected text, translates it into the configured target language, and shows the result near your cursor."
+          },
           "cancel": {
             "name": "Cancel Shortcut",
             "description": "The keyboard shortcut to cancel the current recording."
@@ -189,7 +193,7 @@
           "restore": "Failed to restore original shortcut",
           "set": "Failed to set shortcut: {{error}}",
           "reset": "Failed to reset shortcut to original value",
-          "conflict": "This shortcut conflicts with another transcription action. A shorter modifier-only binding starts recording before a longer combination can fire."
+          "conflict": "This shortcut conflicts with another global action. A shorter modifier-only binding can run before a longer combination fires."
         },
         "conflict": {
           "warning": "Conflicts with {{other}} ({{binding}}). Choose a different combination or restore the recommended shortcut.",
@@ -197,7 +201,8 @@
           "other": {
             "transcribe": "Transcribe",
             "transcribe_with_post_process": "Post-process",
-            "transcribe_with_translation": "Translate"
+            "transcribe_with_translation": "Translate",
+            "translate_selected_text": "Translate selected text"
           }
         }
       },
@@ -638,6 +643,12 @@
         }
       }
     }
+  },
+  "selectionTranslation": {
+    "targetLanguage": "selected language",
+    "translating": "Translating to {{language}}",
+    "translatedTo": "Translated to {{language}}",
+    "failed": "Could not translate selected text"
   },
   "footer": {
     "checkingUpdates": "Checking for updates...",

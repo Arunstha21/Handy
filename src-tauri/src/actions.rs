@@ -21,6 +21,7 @@ use log::{debug, error, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -1412,6 +1413,68 @@ impl ShortcutAction for CancelAction {
     }
 }
 
+/// Translates the selected text in the frontmost application. This action is
+/// deliberately independent from the recording coordinator: it never opens the
+/// microphone and always uses the configured text-model translation profile.
+struct SelectedTextTranslationAction {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl ShortcutAction for SelectedTextTranslationAction {
+    fn start(&self, app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
+        if self.in_flight.swap(true, Ordering::AcqRel) {
+            debug!("Selected-text translation is already running");
+            return;
+        }
+
+        let app_handle = app.clone();
+        let in_flight = Arc::clone(&self.in_flight);
+        std::thread::spawn(move || {
+            let settings = get_settings(&app_handle);
+            let target_language = settings.translation_target_language.trim().to_string();
+            let target_label = language_display_name(&target_language);
+
+            let result = (|| {
+                if target_language.is_empty() || target_language == "auto" {
+                    return Err(
+                        "Choose a translation target language before translating selected text."
+                            .to_string(),
+                    );
+                }
+                balanced_translation_request(&settings)?;
+
+                utils::show_selected_text_translation_loading(&app_handle, &target_label);
+                let selected = crate::clipboard::capture_selected_text(&app_handle)?;
+                tauri::async_runtime::block_on(translate_with_balanced_profile(
+                    &settings,
+                    &selected,
+                    &target_language,
+                ))
+            })();
+
+            match result {
+                Ok(translated) => {
+                    utils::show_selected_text_translation_result(
+                        &app_handle,
+                        &target_label,
+                        translated,
+                    );
+                }
+                Err(error) => {
+                    warn!("Selected-text translation failed: {error}");
+                    utils::show_selected_text_translation_error(&app_handle, error);
+                }
+            }
+
+            in_flight.store(false, Ordering::Release);
+        });
+    }
+
+    fn stop(&self, _app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
+        // This is a press-once action; releasing its shortcut has no effect.
+    }
+}
+
 // Test Action
 struct TestAction;
 
@@ -1457,6 +1520,12 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
         Arc::new(TranscribeAction {
             post_process: false,
             translation: true,
+        }) as Arc<dyn ShortcutAction>,
+    );
+    map.insert(
+        "translate_selected_text".to_string(),
+        Arc::new(SelectedTextTranslationAction {
+            in_flight: Arc::new(AtomicBool::new(false)),
         }) as Arc<dyn ShortcutAction>,
     );
     map.insert(

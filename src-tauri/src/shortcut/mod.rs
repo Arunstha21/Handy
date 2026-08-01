@@ -142,10 +142,10 @@ fn binding_conflict(conflict: conflict::ShortcutConflict) -> BindingResponse {
     }
 }
 
-/// Active transcription bindings that can race each other in the coordinator.
-fn active_transcribe_bindings(settings: &settings::AppSettings) -> Vec<(String, String)> {
+/// Global action bindings that must not share an exact or modifier-prefix chord.
+fn active_conflict_checked_bindings(settings: &settings::AppSettings) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for id in conflict::TRANSCRIBE_BINDING_IDS {
+    for id in conflict::CONFLICT_CHECKED_BINDING_IDS {
         if *id == "transcribe_with_post_process" && !settings.post_process_enabled {
             continue;
         }
@@ -165,7 +165,7 @@ fn conflict_for_candidate(
     action_id: &str,
     candidate: &str,
 ) -> Option<conflict::ShortcutConflict> {
-    let others = active_transcribe_bindings(settings)
+    let others = active_conflict_checked_bindings(settings)
         .into_iter()
         .filter(|(id, _)| id != action_id)
         .collect::<Vec<_>>();

@@ -41,6 +41,11 @@ export const TranslationSettingsCard: React.FC = () => {
         descriptionMode="tooltip"
         grouped={true}
       />
+      <ShortcutInput
+        shortcutId="translate_selected_text"
+        descriptionMode="tooltip"
+        grouped={true}
+      />
     </SettingsGroup>
   );
 };

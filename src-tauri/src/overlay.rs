@@ -36,6 +36,12 @@ tauri_panel! {
             is_floating_panel: true
         }
     })
+    panel!(SelectionTranslationOverlayPanel {
+        config: {
+            can_become_key_window: false,
+            is_floating_panel: true
+        }
+    })
 }
 
 // Native overlay window sizes (logical points). One window is reused for every
@@ -54,6 +60,14 @@ const OVERLAY_HEIGHT: f64 = 46.0;
 // Actual is 394x118, just a little extra
 const OVERLAY_STREAM_WIDTH: f64 = 400.0;
 const OVERLAY_STREAM_HEIGHT: f64 = 120.0;
+
+// A separate, non-activating card positioned beneath the cursor. It is not
+// coupled to the recording-overlay preference because selected-text translation
+// must remain visible even when speech overlays are disabled.
+const SELECTION_TRANSLATION_OVERLAY_WIDTH: f64 = 440.0;
+const SELECTION_TRANSLATION_OVERLAY_HEIGHT: f64 = 148.0;
+const SELECTION_TRANSLATION_CURSOR_GAP: f64 = 18.0;
+const SELECTION_TRANSLATION_EDGE_GAP: f64 = 10.0;
 
 // On a notched MacBook the webview reserves the largest footprint each form can
 // animate into. The visible island is still sized from measured housing geometry
@@ -171,6 +185,7 @@ fn overlay_dimensions(app_handle: &AppHandle, state: &str) -> (f64, f64) {
 }
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
+static SELECTION_TRANSLATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 const EMIT_THROTTLE_MS: u64 = 33; // ~30 FPS
 
 #[cfg(target_os = "macos")]
@@ -338,6 +353,48 @@ fn is_mouse_within_monitor(
         && mouse_x < (monitor_x + monitor_width as i32)
         && mouse_y >= monitor_y
         && mouse_y < (monitor_y + monitor_height as i32)
+}
+
+/// Position the selected-text translation card directly beneath the cursor,
+/// clamped to its active monitor. The cursor is normally inside the text range
+/// the user just selected, so this keeps the result adjacent without querying
+/// app-specific accessibility selection bounds.
+fn calculate_selection_translation_overlay_position(
+    app_handle: &AppHandle,
+    width: f64,
+    height: f64,
+) -> Option<(f64, f64)> {
+    let monitor = get_monitor_with_cursor(app_handle)?;
+    let scale = monitor.scale_factor();
+    let monitor_x = monitor.position().x as f64 / scale;
+    let monitor_y = monitor.position().y as f64 / scale;
+    let monitor_width = monitor.size().width as f64 / scale;
+    let monitor_height = monitor.size().height as f64 / scale;
+
+    let cursor = input::get_cursor_position(app_handle).map(|(x, y)| {
+        #[cfg(target_os = "windows")]
+        {
+            (x as f64 / scale, y as f64 / scale)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            (x as f64, y as f64)
+        }
+    });
+    let (cursor_x, cursor_y) = cursor.unwrap_or((
+        monitor_x + monitor_width / 2.0,
+        monitor_y + monitor_height / 2.0,
+    ));
+
+    let min_x = monitor_x + SELECTION_TRANSLATION_EDGE_GAP;
+    let min_y = monitor_y + SELECTION_TRANSLATION_EDGE_GAP;
+    let max_x = (monitor_x + monitor_width - width - SELECTION_TRANSLATION_EDGE_GAP).max(min_x);
+    let max_y = (monitor_y + monitor_height - height - SELECTION_TRANSLATION_EDGE_GAP).max(min_y);
+
+    Some((
+        (cursor_x - width / 2.0).clamp(min_x, max_x),
+        (cursor_y + SELECTION_TRANSLATION_CURSOR_GAP).clamp(min_y, max_y),
+    ))
 }
 
 /// Measured macOS camera-housing geometry for the monitor under the cursor.
@@ -627,6 +684,81 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 }
 
+/// Creates the non-activating selected-text translation overlay (non-macOS).
+#[cfg(not(target_os = "macos"))]
+pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
+    let (width, height) = (
+        SELECTION_TRANSLATION_OVERLAY_WIDTH,
+        SELECTION_TRANSLATION_OVERLAY_HEIGHT,
+    );
+    let position = calculate_selection_translation_overlay_position(app_handle, width, height)
+        .unwrap_or((0.0, 0.0));
+    let mut builder = WebviewWindowBuilder::new(
+        app_handle,
+        "selection_translation_overlay",
+        tauri::WebviewUrl::App("src/overlay/index.html?mode=selection-translation".into()),
+    )
+    .title("Selected Text Translation")
+    .resizable(false)
+    .inner_size(width, height)
+    .position(position.0, position.1)
+    .shadow(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .transparent(true)
+    .focusable(false)
+    .focused(false)
+    .visible(false);
+
+    if let Some(data_dir) = crate::portable::data_dir() {
+        builder = builder.data_directory(data_dir.join("webview"));
+    }
+
+    if let Err(error) = builder.build() {
+        log::error!("Failed to create selected-text translation overlay: {error}");
+    }
+}
+
+/// Creates the non-activating selected-text translation panel (macOS).
+#[cfg(target_os = "macos")]
+pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
+    let width = SELECTION_TRANSLATION_OVERLAY_WIDTH;
+    let height = SELECTION_TRANSLATION_OVERLAY_HEIGHT;
+    let (x, y) = calculate_selection_translation_overlay_position(app_handle, width, height)
+        .unwrap_or((0.0, 0.0));
+    match PanelBuilder::<_, SelectionTranslationOverlayPanel>::new(
+        app_handle,
+        "selection_translation_overlay",
+    )
+    .url(WebviewUrl::App(
+        "src/overlay/index.html?mode=selection-translation".into(),
+    ))
+    .title("Selected Text Translation")
+    .position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+    .level(PanelLevel::Status)
+    .size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
+    .has_shadow(false)
+    .transparent(true)
+    .no_activate(true)
+    .corner_radius(0.0)
+    .style_mask(StyleMask::empty().borderless().nonactivating_panel())
+    .with_window(|window| window.decorations(false).transparent(true).focusable(false))
+    .collection_behavior(
+        CollectionBehavior::new()
+            .can_join_all_spaces()
+            .full_screen_auxiliary(),
+    )
+    .build()
+    {
+        Ok(panel) => panel.hide(),
+        Err(error) => log::error!("Failed to create selected-text translation panel: {error}"),
+    }
+}
+
 /// Creates the recording overlay panel and keeps it hidden by default (macOS)
 #[cfg(target_os = "macos")]
 pub fn create_recording_overlay(app_handle: &AppHandle) {
@@ -861,6 +993,105 @@ pub fn hide_recording_overlay(app_handle: &AppHandle) {
             let _ = window_clone.hide();
         });
     }
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionTranslationPresentation {
+    state: String,
+    target_language: Option<String>,
+    text: Option<String>,
+}
+
+fn show_selected_text_translation(
+    app_handle: &AppHandle,
+    state: &str,
+    target_language: Option<String>,
+    text: Option<String>,
+    reposition: bool,
+    dismiss_after: Option<std::time::Duration>,
+) {
+    let presentation = SelectionTranslationPresentation {
+        state: state.to_string(),
+        target_language,
+        text,
+    };
+    // Every presentation invalidates a previous auto-dismiss timer. Without
+    // this, a completed earlier translation could hide a newer loading/result
+    // card while it is still active.
+    let generation = SELECTION_TRANSLATION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let handle = app_handle.clone();
+    let _ = app_handle.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("selection_translation_overlay") else {
+            return;
+        };
+
+        if reposition {
+            if let Some((x, y)) = calculate_selection_translation_overlay_position(
+                &handle,
+                SELECTION_TRANSLATION_OVERLAY_WIDTH,
+                SELECTION_TRANSLATION_OVERLAY_HEIGHT,
+            ) {
+                let _ =
+                    window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+            }
+        }
+
+        let _ = window.emit("show-selection-translation", presentation);
+        let _ = window.show();
+
+        if let Some(delay) = dismiss_after {
+            let window_clone = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                if SELECTION_TRANSLATION_GENERATION.load(Ordering::Acquire) == generation {
+                    let _ = window_clone.emit("hide-selection-translation", ());
+                    std::thread::sleep(std::time::Duration::from_millis(180));
+                    let _ = window_clone.hide();
+                }
+            });
+        }
+    });
+}
+
+/// Shows immediate feedback while Handy safely copies and translates the selection.
+pub fn show_selected_text_translation_loading(app_handle: &AppHandle, target_language: &str) {
+    show_selected_text_translation(
+        app_handle,
+        "loading",
+        Some(target_language.to_string()),
+        None,
+        true,
+        None,
+    );
+}
+
+/// Shows the translated text near the original selection, without modifying it.
+pub fn show_selected_text_translation_result(
+    app_handle: &AppHandle,
+    target_language: &str,
+    text: String,
+) {
+    show_selected_text_translation(
+        app_handle,
+        "success",
+        Some(target_language.to_string()),
+        Some(text),
+        false,
+        Some(std::time::Duration::from_secs(7)),
+    );
+}
+
+/// Shows a short, recoverable error in the same non-activating overlay.
+pub fn show_selected_text_translation_error(app_handle: &AppHandle, message: String) {
+    show_selected_text_translation(
+        app_handle,
+        "error",
+        None,
+        Some(message),
+        true,
+        Some(std::time::Duration::from_secs(5)),
+    );
 }
 
 // Cached "overlay is enabled" flag, kept in sync with overlay_style. Avoids

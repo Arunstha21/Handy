@@ -890,6 +890,26 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: default_translation_shortcut.to_string(),
         },
     );
+    #[cfg(target_os = "windows")]
+    let default_selected_text_translation_shortcut = "ctrl+alt+t";
+    #[cfg(target_os = "macos")]
+    let default_selected_text_translation_shortcut = "option+command+t";
+    #[cfg(target_os = "linux")]
+    let default_selected_text_translation_shortcut = "ctrl+alt+t";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let default_selected_text_translation_shortcut = "alt+ctrl+t";
+
+    bindings.insert(
+        "translate_selected_text".to_string(),
+        ShortcutBinding {
+            id: "translate_selected_text".to_string(),
+            name: "Translate Selected Text".to_string(),
+            description: "Translates selected text into the configured target language and shows the result near your cursor."
+                .to_string(),
+            default_binding: default_selected_text_translation_shortcut.to_string(),
+            current_binding: default_selected_text_translation_shortcut.to_string(),
+        },
+    );
     bindings.insert(
         "cancel".to_string(),
         ShortcutBinding {

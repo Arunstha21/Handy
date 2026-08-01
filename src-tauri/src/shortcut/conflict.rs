@@ -17,6 +17,16 @@ pub const TRANSCRIBE_BINDING_IDS: &[&str] = &[
     "transcribe_with_translation",
 ];
 
+/// Global bindings that must not share an exact or modifier-prefix shortcut.
+/// Selected-text translation does not touch the recording coordinator, but it
+/// is still a global action and therefore must not shadow a speech action.
+pub const CONFLICT_CHECKED_BINDING_IDS: &[&str] = &[
+    "transcribe",
+    "transcribe_with_post_process",
+    "transcribe_with_translation",
+    "translate_selected_text",
+];
+
 const MODIFIERS: &[&str] = &[
     "ctrl",
     "control",
@@ -174,6 +184,7 @@ pub fn action_display_name(id: &str) -> String {
         "transcribe" => "Transcribe".to_string(),
         "transcribe_with_post_process" => "Post-process".to_string(),
         "transcribe_with_translation" => "Translate".to_string(),
+        "translate_selected_text" => "Translate selected text".to_string(),
         "cancel" => "Cancel".to_string(),
         other => other.to_string(),
     }
@@ -292,6 +303,20 @@ mod tests {
         )
         .expect("exact match should conflict");
         assert_eq!(c.kind, ConflictKind::Exact);
+    }
+
+    #[test]
+    fn selected_text_translation_conflicts_with_speech_translation() {
+        let conflict = detect_pair_conflict(
+            "translate_selected_text",
+            "option+command+t",
+            "transcribe_with_translation",
+            "option+command+t",
+        )
+        .expect("matching global bindings must conflict");
+
+        assert_eq!(conflict.kind, ConflictKind::Exact);
+        assert_eq!(conflict.other_action_id, "transcribe_with_translation");
     }
 
     #[test]
