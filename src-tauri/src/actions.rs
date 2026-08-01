@@ -474,10 +474,7 @@ impl ShortcutAction for TranscribeAction {
         if self.translation {
             let target_language = settings.translation_target_language.trim();
             let target_supported = selected_model_info.as_ref().is_some_and(|model| {
-                model.supported_languages.iter().any(|language| {
-                    language == target_language
-                        || language.split('-').next() == target_language.split('-').next()
-                })
+                crate::managers::model::supports_translation_target(model, target_language)
             });
             if !settings.translation_enabled {
                 let _ = app.emit(

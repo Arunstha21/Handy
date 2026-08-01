@@ -30,6 +30,12 @@ export const ModelSettingsCard: React.FC = () => {
   const showLanguageSelector =
     supportsLanguageSelection || supportsChineseOnlyScriptSelection;
   const supportsTranslation = currentModelInfo?.supports_translation ?? false;
+  const translationTargetLanguages =
+    currentModelInfo?.engine_type === "TranscribeCpp"
+      ? ["en"]
+      : currentModelInfo?.engine_type === "Canary"
+        ? currentModelInfo.supported_languages
+        : [];
   const experimentalEnabled = getSetting("experimental_enabled") || false;
   const hasAnySettings =
     showLanguageSelector || supportsTranslation || experimentalEnabled;
@@ -60,6 +66,7 @@ export const ModelSettingsCard: React.FC = () => {
           descriptionMode="tooltip"
           grouped={true}
           supportedLanguages={currentModelInfo.supported_languages}
+          translationTargetLanguages={translationTargetLanguages}
         />
       )}
       {experimentalEnabled && (

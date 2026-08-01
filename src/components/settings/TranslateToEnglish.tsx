@@ -14,6 +14,7 @@ interface TranslateToEnglishProps {
   descriptionMode?: "inline" | "tooltip";
   grouped?: boolean;
   supportedLanguages?: string[];
+  translationTargetLanguages?: string[];
 }
 
 export const TranslateToEnglish: React.FC<TranslateToEnglishProps> = React.memo(
@@ -21,16 +22,22 @@ export const TranslateToEnglish: React.FC<TranslateToEnglishProps> = React.memo(
     descriptionMode = "tooltip",
     grouped = false,
     supportedLanguages = [],
+    translationTargetLanguages = [],
   }) => {
     const { t } = useTranslation();
     const { getSetting, updateSetting, isUpdating } = useSettings();
 
     const translationEnabled = getSetting("translation_enabled") || false;
     const targetLanguage = getSetting("translation_target_language") || "en";
-    const targetOptions = MODEL_CAPABILITY_LANGUAGES.filter(
-      (language) =>
-        supportedLanguages.length === 0 ||
-        supportsLanguageCode(supportedLanguages, language.value),
+    const targetOptions = MODEL_CAPABILITY_LANGUAGES.filter((language) =>
+      translationTargetLanguages.length === 0
+        ? supportedLanguages.length === 0 ||
+          supportsLanguageCode(supportedLanguages, language.value)
+        : translationTargetLanguages.some(
+            (target) =>
+              target === language.value ||
+              target.split("-")[0] === language.value.split("-")[0],
+          ),
     ).map((language) => ({
       value: language.value,
       label: getLanguageLabel(language.value) || language.label,

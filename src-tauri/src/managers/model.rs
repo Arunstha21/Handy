@@ -302,6 +302,27 @@ pub fn effective_language(
     recognition_language(&supported_languages[0]).to_string()
 }
 
+/// Return whether a model can produce the requested translation target. The
+/// catalog's `supports_translation` flag means a model has a translation task,
+/// but source-language capabilities are not automatically target-language
+/// capabilities: Whisper-family models target English, while Canary exposes
+/// the multilingual pairs represented by its language list.
+pub fn supports_translation_target(model: &ModelInfo, target_language: &str) -> bool {
+    if !model.supports_translation {
+        return false;
+    }
+
+    let target_base = base_language(target_language);
+    match model.engine_type {
+        EngineType::TranscribeCpp => target_base == "en",
+        EngineType::Canary => model
+            .supported_languages
+            .iter()
+            .any(|language| base_language(language) == target_base),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct DownloadProgress {
     pub model_id: String,
@@ -2625,6 +2646,45 @@ mod tests {
 
         assert_eq!(effective_language("zh-Hans", &languages, true), "zh-Hans");
         assert_eq!(effective_language("zh-Hant", &languages, true), "zh-Hant");
+    }
+
+    fn translation_model(engine_type: EngineType, languages: &[&str]) -> ModelInfo {
+        ModelInfo {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            filename: "test.bin".to_string(),
+            source: ModelSource::Local,
+            size_mb: 1,
+            is_downloaded: true,
+            is_downloading: false,
+            partial_size: 0,
+            is_directory: false,
+            engine_type,
+            accuracy_score: 0.5,
+            speed_score: 0.5,
+            supports_translation: true,
+            is_recommended: false,
+            supported_languages: languages
+                .iter()
+                .map(|language| (*language).to_string())
+                .collect(),
+            supports_language_selection: true,
+            is_custom: false,
+            supports_streaming: false,
+            supports_language_detection: true,
+        }
+    }
+
+    #[test]
+    fn translation_target_capabilities_are_model_specific() {
+        let whisper = translation_model(EngineType::TranscribeCpp, &["en", "es"]);
+        assert!(supports_translation_target(&whisper, "en-US"));
+        assert!(!supports_translation_target(&whisper, "es"));
+
+        let canary = translation_model(EngineType::Canary, &["en", "de", "es"]);
+        assert!(supports_translation_target(&canary, "de-DE"));
+        assert!(!supports_translation_target(&canary, "ja"));
     }
 
     #[test]
