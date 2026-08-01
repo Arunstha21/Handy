@@ -280,17 +280,11 @@ const RecordingOverlay: React.FC = () => {
           "--notch-housing-w": `${notch.housingWidth}px`,
         } as React.CSSProperties)
       : undefined;
-  // Housing-width black fill flush with the top of the display so the island
-  // attaches to the camera cutout instead of floating below it.
-  const notchBridge = isNotch ? (
-    <span className="snotch-bridge" aria-hidden="true" />
-  ) : null;
-
   // ---- Shared building blocks (one visual language for every overlay form) ----
-  // Dynamic Island uses fewer, taller right-side rails (reference); other
-  // placements keep the full waveform in the center.
+  // Dynamic Island: fewer vertical rails on the right wing. Other placements
+  // keep the full waveform in the center.
   const waveBarCount = isNotch ? 5 : WAVE_BARS;
-  const waveMax = isNotch ? 16 : 18;
+  const waveMax = isNotch ? 14 : 18;
   const waveform = (
     <div className="swave" aria-hidden="true">
       {levels.slice(0, waveBarCount).map((v, i) => (
@@ -321,9 +315,13 @@ const RecordingOverlay: React.FC = () => {
     </button>
   );
 
-  // Standard pill: dot (left) | waveform (center) | timer + cancel (right).
-  // Dynamic Island: activity chip (left) | empty stage (center) | waveform + cancel
-  // (right) — matching the system island's three-rail silhouette.
+  // Empty center rail — measured camera-housing width. Keeps the physical
+  // cutout clear of UI so left/right wings stay visible.
+  const housingRail = <div className="shousing" aria-hidden="true" />;
+
+  // Standard pill: dot | waveform | timer + cancel.
+  // Dynamic Island (one capsule around the camera):
+  //   [ ● activity ][  camera housing  ][ |||  ✕ ]
   const listeningRow = (showTimer: boolean, showCancel: boolean) =>
     isNotch ? (
       <div className="sbase">
@@ -332,7 +330,7 @@ const RecordingOverlay: React.FC = () => {
             <span className="sdot" />
           </span>
         </div>
-        <div className="sstage" />
+        {housingRail}
         <div className="sbase-r">
           {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
           {waveform}
@@ -352,7 +350,7 @@ const RecordingOverlay: React.FC = () => {
       </div>
     );
 
-  // Working: spinner/activity (left) | label (center) | cancel (right).
+  // Working keeps the housing void empty; status text sits in the right wing.
   const workingRow = (label: string, showCancel: boolean) =>
     isNotch ? (
       <div className="sbase">
@@ -361,10 +359,11 @@ const RecordingOverlay: React.FC = () => {
             <span className="sspinner" />
           </span>
         </div>
-        <div className="sstage">
+        {housingRail}
+        <div className="sbase-r">
           <span className="swork-label">{label}</span>
+          {showCancel && cancelBtn}
         </div>
-        <div className="sbase-r">{showCancel && cancelBtn}</div>
       </div>
     ) : (
       <div className="sbase">
@@ -418,7 +417,6 @@ const RecordingOverlay: React.FC = () => {
 
     return (
       <div dir={direction} className={`ov-stage ${stage}`} style={stageStyle}>
-        {notchBridge}
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
@@ -456,7 +454,6 @@ const RecordingOverlay: React.FC = () => {
       className={`ov-stage ${stage} ov-fade ${isVisible ? "show" : ""}`}
       style={stageStyle}
     >
-      {notchBridge}
       <div
         className={`scard compact ${working && isVisible ? "cworking" : ""}`}
       >
