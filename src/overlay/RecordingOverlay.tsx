@@ -272,26 +272,27 @@ const RecordingOverlay: React.FC = () => {
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   const stage = stageClass(placement);
+  const isNotch = stage === "notch";
   const stageStyle =
-    stage === "notch" && notch
+    isNotch && notch
       ? ({
           "--notch-safe-top": `${notch.safeAreaTop}px`,
           "--notch-housing-w": `${notch.housingWidth}px`,
         } as React.CSSProperties)
       : undefined;
-  const notchBridge =
-    stage === "notch" ? (
-      <span className="snotch-bridge" aria-hidden="true" />
-    ) : null;
 
   // ---- Shared building blocks (one visual language for every overlay form) ----
+  // Dynamic Island uses fewer, taller right-side rails (reference); other
+  // placements keep the full waveform in the center.
+  const waveBarCount = isNotch ? 5 : WAVE_BARS;
+  const waveMax = isNotch ? 16 : 18;
   const waveform = (
-    <div className="swave">
-      {levels.map((v, i) => (
+    <div className="swave" aria-hidden="true">
+      {levels.slice(0, waveBarCount).map((v, i) => (
         <i
           key={i}
           style={{
-            height: `${Math.max(3, Math.min(18, 3 + Math.pow(v, 0.7) * 15))}px`,
+            height: `${Math.max(3, Math.min(waveMax, 3 + Math.pow(v, 0.7) * (waveMax - 3)))}px`,
           }}
         />
       ))}
@@ -315,32 +316,60 @@ const RecordingOverlay: React.FC = () => {
     </button>
   );
 
-  // dot (left) | waveform (center) | timer + cancel (right) — same structure for
-  // pill & panel, so the Live morph is a pure width change.
-  const listeningRow = (showTimer: boolean, showCancel: boolean) => (
-    <div className="sbase">
-      <div className="sbase-l">
-        <span className="sdot" />
+  // Standard pill: dot (left) | waveform (center) | timer + cancel (right).
+  // Dynamic Island: activity chip (left) | empty stage (center) | waveform + cancel
+  // (right) — matching the system island's three-rail silhouette.
+  const listeningRow = (showTimer: boolean, showCancel: boolean) =>
+    isNotch ? (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sactivity">
+            <span className="sdot" />
+          </span>
+        </div>
+        <div className="sstage" />
+        <div className="sbase-r">
+          {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
+          {waveform}
+          {showCancel && cancelBtn}
+        </div>
       </div>
-      {waveform}
-      <div className="sbase-r">
-        {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
-        {showCancel && cancelBtn}
+    ) : (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sdot" />
+        </div>
+        {waveform}
+        <div className="sbase-r">
+          {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
+          {showCancel && cancelBtn}
+        </div>
       </div>
-    </div>
-  );
+    );
 
-  // spinner (left) | label (center) | cancel (right) — same 3-zone grid as the
-  // listening row, so the label is centered.
-  const workingRow = (label: string, showCancel: boolean) => (
-    <div className="sbase">
-      <div className="sbase-l">
-        <span className="sspinner" />
+  // Working: spinner/activity (left) | label (center) | cancel (right).
+  const workingRow = (label: string, showCancel: boolean) =>
+    isNotch ? (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sactivity">
+            <span className="sspinner" />
+          </span>
+        </div>
+        <div className="sstage">
+          <span className="swork-label">{label}</span>
+        </div>
+        <div className="sbase-r">{showCancel && cancelBtn}</div>
       </div>
-      <span className="swork-label">{label}</span>
-      <div className="sbase-r">{showCancel && cancelBtn}</div>
-    </div>
-  );
+    ) : (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sspinner" />
+        </div>
+        <span className="swork-label">{label}</span>
+        <div className="sbase-r">{showCancel && cancelBtn}</div>
+      </div>
+    );
 
   // ---- Live overlay: a pill that sculpts open into a panel ----
   if (state === "streaming") {
@@ -354,37 +383,53 @@ const RecordingOverlay: React.FC = () => {
     const open = hasText;
     const collapsed = working && !hasText;
 
+    // Control rail + live text. Top/notch place the rail above the transcript
+    // (column-reverse + this order, or column with rail first for notch). Bottom
+    // keeps the original text-then-rail DOM so the pill sits under the text.
+    const controlRail = working
+      ? workingRow(workLabelFromPhase(t, workKind, phaseDetail), true)
+      : listeningRow(open, true);
+    const textRegion = (
+      <div className="stext">
+        <div className="stext-clip">
+          <div
+            className={`stext-cap ${overflowing ? "overflowing" : ""}`}
+            ref={capRef}
+            onScroll={handleStreamScroll}
+          >
+            <p>
+              <span className="committed">
+                {streamText.committed ? streamText.committed + " " : ""}
+              </span>
+              <span className="tentative">{streamText.tentative}</span>
+              {/* Drop the blinking caret once finalizing — it's no longer
+                  capturing, and a static spinner conveys the work. */}
+              {!working && <span className="scaret" />}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+
     return (
       <div dir={direction} className={`ov-stage ${stage}`} style={stageStyle}>
-        {notchBridge}
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
             isVisible ? "" : "leaving"
           }`}
         >
-          <div className="stext">
-            <div className="stext-clip">
-              <div
-                className={`stext-cap ${overflowing ? "overflowing" : ""}`}
-                ref={capRef}
-                onScroll={handleStreamScroll}
-              >
-                <p>
-                  <span className="committed">
-                    {streamText.committed ? streamText.committed + " " : ""}
-                  </span>
-                  <span className="tentative">{streamText.tentative}</span>
-                  {/* Drop the blinking caret once finalizing — it's no longer
-                      capturing, and a static spinner conveys the work. */}
-                  {!working && <span className="scaret" />}
-                </p>
-              </div>
-            </div>
-          </div>
-          {working
-            ? workingRow(workLabelFromPhase(t, workKind, phaseDetail), true)
-            : listeningRow(open, true)}
+          {isNotch ? (
+            <>
+              {controlRail}
+              {textRegion}
+            </>
+          ) : (
+            <>
+              {textRegion}
+              {controlRail}
+            </>
+          )}
         </div>
       </div>
     );
@@ -405,7 +450,6 @@ const RecordingOverlay: React.FC = () => {
       className={`ov-stage ${stage} ov-fade ${isVisible ? "show" : ""}`}
       style={stageStyle}
     >
-      {notchBridge}
       <div
         className={`scard compact ${working && isVisible ? "cworking" : ""}`}
       >

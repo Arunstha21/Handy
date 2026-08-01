@@ -59,13 +59,16 @@ const OVERLAY_STREAM_HEIGHT: f64 = 120.0;
 // animate into. The visible island is still sized from measured housing geometry
 // in CSS, but the native window must not shrink with the resting state or the
 // working/open morph gets clipped at the webview boundary.
-const OVERLAY_NOTCH_WIDTH: f64 = 384.0;
-const OVERLAY_NOTCH_HEIGHT: f64 = 84.0;
-const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 520.0;
-const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 160.0;
+// Webview reserves room for the widest/tallest island state so width morphs
+// (rest → work → open) are not clipped. Visible size is driven by CSS.
+const OVERLAY_NOTCH_WIDTH: f64 = 360.0;
+const OVERLAY_NOTCH_HEIGHT: f64 = 72.0;
+const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 460.0;
+const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 150.0;
 
 const DEFAULT_NOTCH_INSET: f64 = 32.0;
-const DEFAULT_NOTCH_HOUSING_WIDTH: f64 = 164.0;
+/// Approximate MacBook Dynamic Island / camera-housing width in logical points.
+const DEFAULT_NOTCH_HOUSING_WIDTH: f64 = 126.0;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,7 +96,7 @@ fn normalized_notch_presentation(
         safe_area_top: safe_area_top.clamp(20.0, 42.0),
         housing_width: housing_width
             .unwrap_or(DEFAULT_NOTCH_HOUSING_WIDTH)
-            .clamp(140.0, 220.0),
+            .clamp(110.0, 200.0),
     }
 }
 
@@ -920,11 +923,11 @@ mod tests {
     fn notch_presentation_clamps_untrusted_appkit_geometry() {
         let too_small = normalized_notch_presentation(4.0, Some(80.0));
         assert_eq!(too_small.safe_area_top, 20.0);
-        assert_eq!(too_small.housing_width, 140.0);
+        assert_eq!(too_small.housing_width, 110.0);
 
         let too_large = normalized_notch_presentation(90.0, Some(500.0));
         assert_eq!(too_large.safe_area_top, 42.0);
-        assert_eq!(too_large.housing_width, 220.0);
+        assert_eq!(too_large.housing_width, 200.0);
     }
 
     #[test]

@@ -34,16 +34,19 @@
   --ov-base-h: 40px; /* control-row height (.sbase) */
   --ov-cap-max-h: 64px; /* max height of the scrolling live-text region */
 
-  /* Dynamic Island geometry. The backend replaces the first two values with
-     the active MacBook display's AppKit measurements before showing the panel. */
+  /* Dynamic Island geometry. Backend injects --notch-safe-top and
+     --notch-housing-w from AppKit before the first paint. Resting width hugs
+     the camera housing plus side activity rails (matches Apple DI proportions). */
   --notch-safe-top: 32px;
-  --notch-housing-w: 164px;
-  --ov-notch-body-y: max(18px, calc(var(--notch-safe-top) - 5px));
-  --ov-notch-rest-w: clamp(276px, calc(var(--notch-housing-w) + 112px), 312px);
+  --notch-housing-w: 126px;
+  /* Float the capsule just under the top bezel so the full stadium silhouette
+     (rounded top + bottom) reads as an island, not a slab glued to the edge. */
+  --ov-notch-top: 11px;
+  --ov-notch-base-h: 37px;
+  --ov-notch-rest-w: clamp(220px, calc(var(--notch-housing-w) + 96px), 280px);
   --ov-notch-pill-w: var(--ov-notch-rest-w);
-  --ov-notch-work-w: clamp(324px, calc(var(--notch-housing-w) + 172px), 352px);
-  --ov-notch-open-w: 488px;
-  --ov-notch-base-h: 44px;
+  --ov-notch-work-w: clamp(280px, calc(var(--notch-housing-w) + 160px), 340px);
+  --ov-notch-open-w: 420px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -83,30 +86,16 @@
   align-items: flex-start; /* top placement: flush to the top edge */
 }
 .ov-stage.notch {
-  align-items: flex-start; /* notch placement begins at the display edge */
+  align-items: flex-start;
   box-sizing: border-box;
-  padding-top: var(--ov-notch-body-y);
+  padding-top: var(--ov-notch-top);
   isolation: isolate;
 }
 
-/* The hardware-sized bridge occupies the menu-bar exclusion while the rounded
-   body hangs below it. This creates the same two-part silhouette as the physical
-   camera housing + Dynamic Island instead of drawing one square-topped slab. */
+/* Hardware camera housing is covered by the island body itself — no separate
+   square bridge (that read as a slab). Kept in the DOM as a no-op for hot reload. */
 .snotch-bridge {
-  display: none;
-}
-.ov-stage.notch .snotch-bridge {
-  position: absolute;
-  z-index: 0;
-  top: 0;
-  left: 50%;
-  display: block;
-  width: var(--notch-housing-w);
-  height: calc(var(--ov-notch-body-y) + 9px);
-  translate: -50% 0;
-  border-radius: 0 0 8px 8px;
-  background: #000;
-  pointer-events: none;
+  display: none !important;
 }
 
 /* Compact pill: fade the whole container in/out (the pill itself never pops or
@@ -130,9 +119,8 @@
   transform-origin: top center;
 }
 .ov-stage.notch .scard {
-  /* The native window begins at the display edge. Keep the same downward
-     growth as a Top overlay while visually merging with the camera housing. */
-  flex-direction: column-reverse;
+  /* Grow the live transcript downward from the island (control row stays on top). */
+  flex-direction: column;
   transform-origin: top center;
 }
 .ov-stage.top .stext-cap {
@@ -146,7 +134,7 @@
   mask-image: none;
 }
 .ov-stage.notch .stext-cap {
-  padding-top: 0;
+  padding-top: 10px;
   padding-bottom: 12px;
   -webkit-mask-image: none;
   mask-image: none;
@@ -227,61 +215,158 @@
   width: var(--ov-work-w);
 }
 
-/* Notch / Dynamic Island treatment. The body is a fully rounded black capsule
-   behind the hardware bridge, matching the reference's soft top shoulders and
-   deep lower corners. Only applied after the backend confirms notch_attached. */
+/* ============================================================
+   Dynamic Island (notch_attached only).
+   Matches the system island silhouette: pure-black stadium capsule, full
+   end-caps, soft under-shadow, left activity chip / center stage / right
+   waveform rails. Never applied on external / non-notch displays.
+   ============================================================ */
 .ov-stage.notch .scard {
   position: relative;
   z-index: 1;
   width: var(--ov-notch-pill-w);
   background: #000;
   border: 0;
-  border-radius: 22px;
-  box-shadow: 0 5px 14px rgb(0 0 0 / 28%);
+  /* True stadium: radius ≥ half height so both ends are perfect half-circles. */
+  border-radius: 9999px;
+  /* Soft layered shadow like the system island (reference). */
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 6%) inset,
+    0 4px 12px rgb(0 0 0 / 35%),
+    0 10px 28px rgb(0 0 0 / 28%);
   transition:
-    width 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    width 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    border-radius 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    box-shadow 280ms ease;
+  animation: di-pop 420ms cubic-bezier(0.32, 0.72, 0, 1);
 }
+@keyframes di-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* Expanded live transcript: keep continuous black mass, slightly less extreme
+   radius so the taller panel still reads as the same island family. */
 .ov-stage.notch .scard.open {
   width: var(--ov-notch-open-w);
-  border-radius: 24px;
+  border-radius: 28px;
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 6%) inset,
+    0 6px 16px rgb(0 0 0 / 38%),
+    0 14px 36px rgb(0 0 0 / 30%);
 }
 .ov-stage.notch .scard.working,
 .ov-stage.notch .scard.compact.cworking {
   width: var(--ov-notch-work-w);
-  border-radius: 22px;
+  border-radius: 9999px;
 }
 .ov-stage.notch .scard.compact {
   width: var(--ov-notch-rest-w);
+  animation: di-pop 420ms cubic-bezier(0.32, 0.72, 0, 1);
 }
+.ov-stage.notch .scard.leaving {
+  opacity: 0;
+  transform: scale(0.92);
+  transition:
+    opacity 200ms ease,
+    transform 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Three-rail control row: [activity] | [center stage] | [waveform + cancel] */
 .ov-stage.notch .sbase {
   height: var(--ov-notch-base-h);
-  padding: 0 14px;
+  padding: 0 10px 0 8px;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 8px;
 }
-.ov-stage.notch .sdot {
-  background: #ff5368;
+.ov-stage.notch .sbase-l {
+  padding-left: 2px;
 }
-.ov-stage.notch .swave i {
-  background: #d8dcff;
+.ov-stage.notch .sbase-r {
+  gap: 8px;
 }
-.ov-stage.notch .stext-cap,
+
+/* Left activity chip — rounded tile like the system media/activity indicator. */
+.ov-stage.notch .sactivity {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(255 255 255 / 10%);
+  flex: none;
+}
+.ov-stage.notch .sactivity .sdot {
+  width: 8px;
+  height: 8px;
+  background: #ff453a;
+  animation: sdot-pulse 1.9s infinite;
+}
+.ov-stage.notch .sactivity .sspinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+  border-color: rgb(255 255 255 / 22%);
+  border-top-color: #f5f5f7;
+}
+
+/* Center stage is intentionally empty while listening (matches DI breathing
+   room); working labels sit centered in this column. */
+.ov-stage.notch .sstage {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .ov-stage.notch .swork-label {
   color: #f5f5f7;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  padding: 0 4px;
+}
+
+/* Right-side vertical waveform rails (reference island audio glyph). */
+.ov-stage.notch .swave {
+  gap: 2.5px;
+  padding-right: 0;
+  height: 16px;
+}
+.ov-stage.notch .swave i {
+  width: 3px;
+  min-height: 3px;
+  max-height: 16px;
+  border-radius: 1.5px;
+  background: #d1d1d6;
+}
+.ov-stage.notch .stext-cap {
+  color: #f5f5f7;
+  font-style: normal;
+  font-size: 14px;
 }
 .ov-stage.notch .stimer {
-  color: #aaaab5;
+  color: #8e8e93;
+  font-size: 11px;
+  opacity: 1;
 }
 .ov-stage.notch .sx {
+  width: 22px;
+  height: 22px;
   color: #f5f5f7;
-  background: rgb(255 255 255 / 14%);
+  background: rgb(255 255 255 / 12%);
 }
 .ov-stage.notch .sx:hover {
-  background: rgb(255 255 255 / 24%);
+  background: rgb(255 255 255 / 22%);
   color: #fff;
 }
-.ov-stage.notch .sspinner {
-  border-color: rgb(255 255 255 / 22%);
-  border-top-color: #d8dcff;
+.ov-stage.notch .scaret {
+  background: #f5f5f7;
 }
 
 /* text region — auto-height open via grid-rows trick; region fades as a whole */
