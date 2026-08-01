@@ -280,6 +280,11 @@ const RecordingOverlay: React.FC = () => {
           "--notch-housing-w": `${notch.housingWidth}px`,
         } as React.CSSProperties)
       : undefined;
+  // Housing-width black fill flush with the top of the display so the island
+  // attaches to the camera cutout instead of floating below it.
+  const notchBridge = isNotch ? (
+    <span className="snotch-bridge" aria-hidden="true" />
+  ) : null;
 
   // ---- Shared building blocks (one visual language for every overlay form) ----
   // Dynamic Island uses fewer, taller right-side rails (reference); other
@@ -413,6 +418,7 @@ const RecordingOverlay: React.FC = () => {
 
     return (
       <div dir={direction} className={`ov-stage ${stage}`} style={stageStyle}>
+        {notchBridge}
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
@@ -450,6 +456,7 @@ const RecordingOverlay: React.FC = () => {
       className={`ov-stage ${stage} ov-fade ${isVisible ? "show" : ""}`}
       style={stageStyle}
     >
+      {notchBridge}
       <div
         className={`scard compact ${working && isVisible ? "cworking" : ""}`}
       >

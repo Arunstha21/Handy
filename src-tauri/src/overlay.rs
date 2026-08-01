@@ -75,10 +75,11 @@ const SELECTION_TRANSLATION_EDGE_GAP: f64 = 10.0;
 // working/open morph gets clipped at the webview boundary.
 // Webview reserves room for the widest/tallest island state so width morphs
 // (rest → work → open) are not clipped. Visible size is driven by CSS.
-const OVERLAY_NOTCH_WIDTH: f64 = 360.0;
-const OVERLAY_NOTCH_HEIGHT: f64 = 72.0;
-const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 460.0;
-const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 150.0;
+// Compact height must fit housing bridge (~safe-area) + hanging control capsule.
+const OVERLAY_NOTCH_WIDTH: f64 = 380.0;
+const OVERLAY_NOTCH_HEIGHT: f64 = 88.0;
+const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 480.0;
+const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 168.0;
 
 const DEFAULT_NOTCH_INSET: f64 = 32.0;
 /// Approximate MacBook Dynamic Island / camera-housing width in logical points.

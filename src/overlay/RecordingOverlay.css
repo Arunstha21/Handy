@@ -35,18 +35,20 @@
   --ov-cap-max-h: 64px; /* max height of the scrolling live-text region */
 
   /* Dynamic Island geometry. Backend injects --notch-safe-top and
-     --notch-housing-w from AppKit before the first paint. Resting width hugs
-     the camera housing plus side activity rails (matches Apple DI proportions). */
+     --notch-housing-w from AppKit before the first paint.
+     The island is flush with the top of the display: a housing-width bridge
+     covers the physical camera cutout, and the control capsule hangs just
+     below it so UI is never drawn under the hardware. */
   --notch-safe-top: 32px;
   --notch-housing-w: 126px;
-  /* Float the capsule just under the top bezel so the full stadium silhouette
-     (rounded top + bottom) reads as an island, not a slab glued to the edge. */
-  --ov-notch-top: 11px;
-  --ov-notch-base-h: 37px;
-  --ov-notch-rest-w: clamp(220px, calc(var(--notch-housing-w) + 96px), 280px);
+  /* How far the control body sits below the top edge. Overlaps the bridge by
+     a few points so the silhouette is continuous with the camera housing. */
+  --ov-notch-body-y: max(22px, calc(var(--notch-safe-top) - 6px));
+  --ov-notch-base-h: 36px;
+  --ov-notch-rest-w: clamp(248px, calc(var(--notch-housing-w) + 120px), 300px);
   --ov-notch-pill-w: var(--ov-notch-rest-w);
-  --ov-notch-work-w: clamp(280px, calc(var(--notch-housing-w) + 160px), 340px);
-  --ov-notch-open-w: 420px;
+  --ov-notch-work-w: clamp(300px, calc(var(--notch-housing-w) + 180px), 360px);
+  --ov-notch-open-w: 440px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -88,14 +90,29 @@
 .ov-stage.notch {
   align-items: flex-start;
   box-sizing: border-box;
-  padding-top: var(--ov-notch-top);
+  /* Flush to the display top — the bridge occupies the camera cutout zone. */
+  padding-top: 0;
   isolation: isolate;
 }
 
-/* Hardware camera housing is covered by the island body itself — no separate
-   square bridge (that read as a slab). Kept in the DOM as a no-op for hot reload. */
+/* Black fill over the physical camera housing (menu-bar exclusion). Flush to
+   the top edge so the island is not "lower" than the hardware notch. */
 .snotch-bridge {
-  display: none !important;
+  display: none;
+  pointer-events: none;
+}
+.ov-stage.notch .snotch-bridge {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 50%;
+  display: block;
+  width: var(--notch-housing-w);
+  /* Reach into the body so there is no gap between housing and capsule. */
+  height: calc(var(--ov-notch-body-y) + 12px);
+  translate: -50% 0;
+  border-radius: 0 0 14px 14px;
+  background: #000;
 }
 
 /* Compact pill: fade the whole container in/out (the pill itself never pops or
@@ -217,48 +234,50 @@
 
 /* ============================================================
    Dynamic Island (notch_attached only).
-   Matches the system island silhouette: pure-black stadium capsule, full
-   end-caps, soft under-shadow, left activity chip / center stage / right
-   waveform rails. Never applied on external / non-notch displays.
+   Flush with the top of the display: housing bridge + wider control capsule
+   that hangs just under the camera so left/right rails stay visible. Never
+   applied on external / non-notch displays.
    ============================================================ */
 .ov-stage.notch .scard {
   position: relative;
   z-index: 1;
+  /* Hang under the camera housing; slight overlap with the bridge = seamless. */
+  margin-top: var(--ov-notch-body-y);
   width: var(--ov-notch-pill-w);
   background: #000;
   border: 0;
-  /* True stadium: radius ≥ half height so both ends are perfect half-circles. */
+  /* Stadium ends; top edge blends into the bridge so the whole shape reads as
+     one island attached to the camera cutout. */
   border-radius: 9999px;
-  /* Soft layered shadow like the system island (reference). */
   box-shadow:
-    0 1px 0 rgb(255 255 255 / 6%) inset,
-    0 4px 12px rgb(0 0 0 / 35%),
-    0 10px 28px rgb(0 0 0 / 28%);
+    0 1px 0 rgb(255 255 255 / 5%) inset,
+    0 6px 16px rgb(0 0 0 / 32%),
+    0 14px 32px rgb(0 0 0 / 22%);
   transition:
     width 280ms cubic-bezier(0.32, 0.72, 0, 1),
     border-radius 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    margin-top 280ms cubic-bezier(0.32, 0.72, 0, 1),
     box-shadow 280ms ease;
-  animation: di-pop 420ms cubic-bezier(0.32, 0.72, 0, 1);
+  animation: di-pop 380ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 @keyframes di-pop {
   from {
     opacity: 0;
-    transform: scale(0.88);
+    transform: scale(0.92);
   }
   to {
     opacity: 1;
     transform: none;
   }
 }
-/* Expanded live transcript: keep continuous black mass, slightly less extreme
-   radius so the taller panel still reads as the same island family. */
+/* Expanded live transcript hangs further; keep continuous black mass. */
 .ov-stage.notch .scard.open {
   width: var(--ov-notch-open-w);
-  border-radius: 28px;
+  border-radius: 26px;
   box-shadow:
-    0 1px 0 rgb(255 255 255 / 6%) inset,
-    0 6px 16px rgb(0 0 0 / 38%),
-    0 14px 36px rgb(0 0 0 / 30%);
+    0 1px 0 rgb(255 255 255 / 5%) inset,
+    0 8px 20px rgb(0 0 0 / 36%),
+    0 18px 40px rgb(0 0 0 / 24%);
 }
 .ov-stage.notch .scard.working,
 .ov-stage.notch .scard.compact.cworking {
@@ -267,14 +286,14 @@
 }
 .ov-stage.notch .scard.compact {
   width: var(--ov-notch-rest-w);
-  animation: di-pop 420ms cubic-bezier(0.32, 0.72, 0, 1);
+  animation: di-pop 380ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 .ov-stage.notch .scard.leaving {
   opacity: 0;
-  transform: scale(0.92);
+  transform: scale(0.94);
   transition:
-    opacity 200ms ease,
-    transform 240ms cubic-bezier(0.32, 0.72, 0, 1);
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 /* Three-rail control row: [activity] | [center stage] | [waveform + cancel] */
