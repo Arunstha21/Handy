@@ -253,6 +253,7 @@ jobs:
             const config = JSON.parse(await Bun.file(path).text());
             delete config.bundle.macOS.signingIdentity;
             delete config.bundle.windows.signCommand;
+            config.bundle.createUpdaterArtifacts = false;
             await Bun.write(path, JSON.stringify(config, null, 2) + "\n");
           '
 
