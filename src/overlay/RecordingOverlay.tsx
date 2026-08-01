@@ -21,11 +21,18 @@ type OverlayState =
   | "verifying";
 
 /** Effective placement from the backend — notch styling only for NotchAttached. */
-type OverlayPlacement =
-  | "notch_attached"
-  | "top_fallback"
-  | "top"
-  | "bottom";
+type OverlayPlacement = "notch_attached" | "top_fallback" | "top" | "bottom";
+
+type NotchPresentation = {
+  safeAreaTop: number;
+  housingWidth: number;
+};
+
+type OverlayPresentation = {
+  state: OverlayState;
+  placement?: OverlayPlacement;
+  notch?: NotchPresentation;
+};
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
@@ -39,9 +46,7 @@ function workLabelFromPhase(
   switch (kind) {
     case "translating": {
       const language =
-        detail?.target_language_name ||
-        detail?.target_language ||
-        undefined;
+        detail?.target_language_name || detail?.target_language || undefined;
       return language
         ? t("overlay.translatingTo", { language })
         : t("overlay.translating");
@@ -113,6 +118,7 @@ const RecordingOverlay: React.FC = () => {
   const [session, setSession] = useState(0);
   // Effective placement from the last show-overlay / placement event.
   const [placement, setPlacement] = useState<OverlayPlacement>("bottom");
+  const [notch, setNotch] = useState<NotchPresentation | null>(null);
   // True once live text overflows the cap. A top overlay fades its top edge only
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
@@ -128,12 +134,13 @@ const RecordingOverlay: React.FC = () => {
   useEffect(() => {
     const setupEventListeners = async () => {
       const unlistenShow = await listen("show-overlay", async (event) => {
-        await syncLanguageFromSettings();
+        // Language synchronization does not need to delay placement. Applying
+        // the combined backend payload immediately prevents a one-frame top-pill
+        // flash before the attached notch shape is painted.
+        void syncLanguageFromSettings();
         // Prefer backend effective placement when present (object payload).
         // Older path sends a plain state string.
-        const payload = event.payload as
-          | OverlayState
-          | { state: OverlayState; placement?: OverlayPlacement };
+        const payload = event.payload as OverlayState | OverlayPresentation;
 
         let overlayState: OverlayState;
         if (typeof payload === "string") {
@@ -164,6 +171,7 @@ const RecordingOverlay: React.FC = () => {
           if (payload.placement) {
             setPlacement(payload.placement);
           }
+          setNotch(payload.notch ?? null);
         }
 
         setState(overlayState);
@@ -184,6 +192,9 @@ const RecordingOverlay: React.FC = () => {
         "overlay-placement",
         (event) => {
           setPlacement(event.payload);
+          if (event.payload !== "notch_attached") {
+            setNotch(null);
+          }
         },
       );
 
@@ -261,6 +272,17 @@ const RecordingOverlay: React.FC = () => {
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   const stage = stageClass(placement);
+  const stageStyle =
+    stage === "notch" && notch
+      ? ({
+          "--notch-safe-top": `${notch.safeAreaTop}px`,
+          "--notch-housing-w": `${notch.housingWidth}px`,
+        } as React.CSSProperties)
+      : undefined;
+  const notchBridge =
+    stage === "notch" ? (
+      <span className="snotch-bridge" aria-hidden="true" />
+    ) : null;
 
   // ---- Shared building blocks (one visual language for every overlay form) ----
   const waveform = (
@@ -333,7 +355,8 @@ const RecordingOverlay: React.FC = () => {
     const collapsed = working && !hasText;
 
     return (
-      <div dir={direction} className={`ov-stage ${stage}`}>
+      <div dir={direction} className={`ov-stage ${stage}`} style={stageStyle}>
+        {notchBridge}
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
@@ -380,7 +403,9 @@ const RecordingOverlay: React.FC = () => {
     <div
       dir={direction}
       className={`ov-stage ${stage} ov-fade ${isVisible ? "show" : ""}`}
+      style={stageStyle}
     >
+      {notchBridge}
       <div
         className={`scard compact ${working && isVisible ? "cworking" : ""}`}
       >

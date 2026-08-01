@@ -55,13 +55,47 @@ const OVERLAY_HEIGHT: f64 = 46.0;
 const OVERLAY_STREAM_WIDTH: f64 = 400.0;
 const OVERLAY_STREAM_HEIGHT: f64 = 120.0;
 
-// On a notched MacBook the overlay becomes an attached Dynamic Island-style
-// control. These larger sizes leave room for the black housing shape and for
-// the live transcript to expand down from the display's top edge.
-const OVERLAY_NOTCH_WIDTH: f64 = 336.0;
-const OVERLAY_NOTCH_HEIGHT: f64 = 52.0;
-const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 508.0;
-const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 132.0;
+// On a notched MacBook the webview reserves the largest footprint each form can
+// animate into. The visible island is still sized from measured housing geometry
+// in CSS, but the native window must not shrink with the resting state or the
+// working/open morph gets clipped at the webview boundary.
+const OVERLAY_NOTCH_WIDTH: f64 = 384.0;
+const OVERLAY_NOTCH_HEIGHT: f64 = 84.0;
+const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 520.0;
+const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 160.0;
+
+const DEFAULT_NOTCH_INSET: f64 = 32.0;
+const DEFAULT_NOTCH_HOUSING_WIDTH: f64 = 164.0;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotchPresentation {
+    safe_area_top: f64,
+    housing_width: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OverlayPresentation {
+    state: String,
+    placement: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notch: Option<NotchPresentation>,
+}
+
+fn normalized_notch_presentation(
+    safe_area_top: f64,
+    housing_width: Option<f64>,
+) -> NotchPresentation {
+    NotchPresentation {
+        // Current MacBook notch depths are around the low 30s. Keep corrupted or
+        // future API values from pushing the visible body outside our window.
+        safe_area_top: safe_area_top.clamp(20.0, 42.0),
+        housing_width: housing_width
+            .unwrap_or(DEFAULT_NOTCH_HOUSING_WIDTH)
+            .clamp(140.0, 220.0),
+    }
+}
 
 /// Effective overlay placement for the current display and user preference.
 /// Frontend applies notch styling only for [`EffectivePlacement::NotchAttached`].
@@ -112,24 +146,6 @@ fn resolve_effective_placement(app_handle: &AppHandle) -> EffectivePlacement {
     }
 }
 
-/// Clamp measured housing width into a usable island width with safe min/max.
-#[cfg(target_os = "macos")]
-fn notch_island_width(housing_width: Option<f64>, streaming: bool) -> f64 {
-    // Housing is often ~150–200pt; the island should extend slightly past it.
-    let base = housing_width.unwrap_or(if streaming {
-        OVERLAY_NOTCH_STREAM_WIDTH
-    } else {
-        OVERLAY_NOTCH_WIDTH
-    });
-    let padded = base + if streaming { 120.0 } else { 80.0 };
-    let (min_w, max_w) = if streaming {
-        (360.0, OVERLAY_NOTCH_STREAM_WIDTH)
-    } else {
-        (240.0, OVERLAY_NOTCH_WIDTH)
-    };
-    padded.clamp(min_w, max_w)
-}
-
 /// Overlay window size (logical) for a given UI state.
 fn overlay_dimensions(app_handle: &AppHandle, state: &str) -> (f64, f64) {
     let placement = resolve_effective_placement(app_handle);
@@ -137,27 +153,11 @@ fn overlay_dimensions(app_handle: &AppHandle, state: &str) -> (f64, f64) {
     let streaming = state == "streaming";
 
     if is_notch {
-        #[cfg(target_os = "macos")]
-        {
-            let housing = get_monitor_with_cursor(app_handle)
-                .and_then(|m| macos_notch_geometry(&m))
-                .and_then(|g| g.housing_width);
-            let width = notch_island_width(housing, streaming);
-            let height = if streaming {
-                OVERLAY_NOTCH_STREAM_HEIGHT
-            } else {
-                OVERLAY_NOTCH_HEIGHT
-            };
-            return (width, height);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            return if streaming {
-                (OVERLAY_NOTCH_STREAM_WIDTH, OVERLAY_NOTCH_STREAM_HEIGHT)
-            } else {
-                (OVERLAY_NOTCH_WIDTH, OVERLAY_NOTCH_HEIGHT)
-            };
-        }
+        return if streaming {
+            (OVERLAY_NOTCH_STREAM_WIDTH, OVERLAY_NOTCH_STREAM_HEIGHT)
+        } else {
+            (OVERLAY_NOTCH_WIDTH, OVERLAY_NOTCH_HEIGHT)
+        };
     }
 
     if streaming {
@@ -409,12 +409,6 @@ fn macos_notch_geometry(monitor: &tauri::Monitor) -> Option<NotchGeometry> {
     (distance <= tolerance && geometry.inset > 0.0).then_some(geometry)
 }
 
-/// Back-compat helper: top safe-area inset only.
-#[cfg(target_os = "macos")]
-fn macos_notch_inset(monitor: &tauri::Monitor) -> Option<f64> {
-    macos_notch_geometry(monitor).map(|g| g.inset)
-}
-
 /// Returns overlay position in logical coordinates (points on macOS).
 ///
 /// The Bottom anchor uses the macOS work area (visibleFrame) so the overlay
@@ -447,7 +441,7 @@ fn calculate_overlay_position(
         OverlayPosition::Notch => {
             #[cfg(target_os = "macos")]
             {
-                macos_notch_inset(&monitor)
+                macos_notch_geometry(&monitor)
                     // Start at the physical display edge, not below the safe
                     // area: the black card is the visual continuation of the
                     // camera housing, like a Dynamic Island.
@@ -723,6 +717,34 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
         };
         let pos_calc_elapsed = pos_started.elapsed() - set_pos_elapsed;
 
+        let placement = resolve_effective_placement(app_handle);
+        #[cfg(target_os = "macos")]
+        let notch = if placement == EffectivePlacement::NotchAttached {
+            get_monitor_with_cursor(app_handle)
+                .and_then(|monitor| macos_notch_geometry(&monitor))
+                .map(|geometry| {
+                    normalized_notch_presentation(geometry.inset, geometry.housing_width)
+                })
+                .or_else(|| Some(normalized_notch_presentation(DEFAULT_NOTCH_INSET, None)))
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let notch = None;
+
+        // Send placement and measured notch geometry as one payload before the
+        // native window becomes visible. The overlay starts transparent, so the
+        // first painted frame has the correct attached/fallback silhouette.
+        let presentation = OverlayPresentation {
+            state: state.to_string(),
+            placement: placement.as_str().to_string(),
+            notch,
+        };
+        let _ = overlay_window.emit("show-overlay", presentation);
+        // Retain the placement-only event for older overlay webviews during a
+        // development hot reload.
+        let _ = overlay_window.emit("overlay-placement", placement.as_str());
+
         let show_started = std::time::Instant::now();
         let _ = overlay_window.show();
         let show_elapsed = show_started.elapsed();
@@ -738,12 +760,6 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
             log::error!("Failed to re-assert recording overlay position: {error}");
         }
 
-        let placement = resolve_effective_placement(app_handle);
-        // Emit state as a plain string for backwards-compatible listeners, and
-        // a separate placement event so the frontend only applies notch CSS when
-        // the current display is actually attached to the camera housing.
-        let _ = overlay_window.emit("show-overlay", &state);
-        let _ = overlay_window.emit("overlay-placement", placement.as_str());
         log::debug!(
             "overlay '{}' placement={}: set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
             state,
@@ -899,6 +915,24 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notch_presentation_clamps_untrusted_appkit_geometry() {
+        let too_small = normalized_notch_presentation(4.0, Some(80.0));
+        assert_eq!(too_small.safe_area_top, 20.0);
+        assert_eq!(too_small.housing_width, 140.0);
+
+        let too_large = normalized_notch_presentation(90.0, Some(500.0));
+        assert_eq!(too_large.safe_area_top, 42.0);
+        assert_eq!(too_large.housing_width, 220.0);
+    }
+
+    #[test]
+    fn notch_presentation_uses_hardware_sized_default() {
+        let geometry = normalized_notch_presentation(DEFAULT_NOTCH_INSET, None);
+        assert_eq!(geometry.safe_area_top, DEFAULT_NOTCH_INSET);
+        assert_eq!(geometry.housing_width, DEFAULT_NOTCH_HOUSING_WIDTH);
+    }
 
     #[test]
     fn monitor_hit_test_uses_half_open_physical_bounds() {

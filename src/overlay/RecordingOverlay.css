@@ -34,13 +34,16 @@
   --ov-base-h: 40px; /* control-row height (.sbase) */
   --ov-cap-max-h: 64px; /* max height of the scrolling live-text region */
 
-  /* Dynamic Island-style notch geometry. The native notched window in
-     overlay.rs is intentionally a little wider/taller than this footprint. */
-  --ov-notch-rest-w: 284px;
-  --ov-notch-pill-w: 296px;
-  --ov-notch-work-w: 330px;
-  --ov-notch-open-w: 484px;
-  --ov-notch-base-h: 48px;
+  /* Dynamic Island geometry. The backend replaces the first two values with
+     the active MacBook display's AppKit measurements before showing the panel. */
+  --notch-safe-top: 32px;
+  --notch-housing-w: 164px;
+  --ov-notch-body-y: max(18px, calc(var(--notch-safe-top) - 5px));
+  --ov-notch-rest-w: clamp(276px, calc(var(--notch-housing-w) + 112px), 312px);
+  --ov-notch-pill-w: var(--ov-notch-rest-w);
+  --ov-notch-work-w: clamp(324px, calc(var(--notch-housing-w) + 172px), 352px);
+  --ov-notch-open-w: 488px;
+  --ov-notch-base-h: 44px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -81,6 +84,29 @@
 }
 .ov-stage.notch {
   align-items: flex-start; /* notch placement begins at the display edge */
+  box-sizing: border-box;
+  padding-top: var(--ov-notch-body-y);
+  isolation: isolate;
+}
+
+/* The hardware-sized bridge occupies the menu-bar exclusion while the rounded
+   body hangs below it. This creates the same two-part silhouette as the physical
+   camera housing + Dynamic Island instead of drawing one square-topped slab. */
+.snotch-bridge {
+  display: none;
+}
+.ov-stage.notch .snotch-bridge {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 50%;
+  display: block;
+  width: var(--notch-housing-w);
+  height: calc(var(--ov-notch-body-y) + 9px);
+  translate: -50% 0;
+  border-radius: 0 0 8px 8px;
+  background: #000;
+  pointer-events: none;
 }
 
 /* Compact pill: fade the whole container in/out (the pill itself never pops or
@@ -201,36 +227,29 @@
   width: var(--ov-work-w);
 }
 
-/* Notch / Dynamic Island treatment. Pure black and flush at the top so the
-   card continues the camera housing. Curved lower corners + slight side
-   shoulder rounding keep it from reading as a rectangular slab. Only applied
-   when the backend reports notch_attached (never on external displays). */
+/* Notch / Dynamic Island treatment. The body is a fully rounded black capsule
+   behind the hardware bridge, matching the reference's soft top shoulders and
+   deep lower corners. Only applied after the backend confirms notch_attached. */
 .ov-stage.notch .scard {
+  position: relative;
+  z-index: 1;
   width: var(--ov-notch-pill-w);
-  background: #050505;
+  background: #000;
   border: 0;
-  /* Top stays square against the bezel; bottom and soft side shoulders form
-     the island silhouette. */
-  border-radius: 0 0 22px 22px;
-  box-shadow:
-    -14px 0 0 -6px #050505,
-    14px 0 0 -6px #050505;
+  border-radius: 22px;
+  box-shadow: 0 5px 14px rgb(0 0 0 / 28%);
   transition:
     width 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .ov-stage.notch .scard.open {
   width: var(--ov-notch-open-w);
-  border-radius: 0 0 24px 24px;
-  box-shadow:
-    -16px 0 0 -6px #050505,
-    16px 0 0 -6px #050505;
+  border-radius: 24px;
 }
 .ov-stage.notch .scard.working,
 .ov-stage.notch .scard.compact.cworking {
   width: var(--ov-notch-work-w);
-  border-radius: 0 0 20px 20px;
+  border-radius: 22px;
 }
 .ov-stage.notch .scard.compact {
   width: var(--ov-notch-rest-w);
