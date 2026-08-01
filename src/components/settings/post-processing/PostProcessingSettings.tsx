@@ -426,10 +426,19 @@ PostProcessingSettingsPrompts.displayName = "PostProcessingSettingsPrompts";
 
 export const PostProcessingSettings: React.FC = () => {
   const { t } = useTranslation();
+  const { getSetting } = useSettings();
+  const selectedModel =
+    getSetting("post_process_models")?.[
+      getSetting("post_process_provider_id") || ""
+    ] || "";
+  const isFreeModel = /:free$/i.test(selectedModel);
 
   return (
     <div className="max-w-3xl w-full mx-auto space-y-6">
       <SettingsGroup title={t("settings.postProcessing.hotkey.title")}>
+        <p className="text-sm text-mid-gray px-1 pb-2">
+          {t("settings.postProcessing.hotkey.description")}
+        </p>
         <ShortcutInput
           shortcutId="transcribe_with_post_process"
           descriptionMode="tooltip"
@@ -438,6 +447,11 @@ export const PostProcessingSettings: React.FC = () => {
       </SettingsGroup>
 
       <SettingsGroup title={t("settings.postProcessing.api.title")}>
+        {isFreeModel && (
+          <Alert variant="warning" contained>
+            {t("settings.postProcessing.freeModelWarning")}
+          </Alert>
+        )}
         <PostProcessingSettingsApi />
       </SettingsGroup>
 

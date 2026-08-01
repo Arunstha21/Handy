@@ -6,7 +6,7 @@ import { ResetButton } from "../ui/ResetButton";
 import { SettingContainer } from "../ui/SettingContainer";
 import { useSettings } from "../../hooks/useSettings";
 import { useOsType } from "../../hooks/useOsType";
-import { commands } from "@/bindings";
+import { commands, type ShortcutConflict } from "@/bindings";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { SECURE_INPUT_HELP_URL } from "../SecureInputWarning";
@@ -25,6 +25,8 @@ interface HandyKeysEvent {
   hotkey_string: string;
 }
 
+type BindingError = Error & { conflict?: ShortcutConflict | null };
+
 export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
   descriptionMode = "tooltip",
   grouped = false,
@@ -37,6 +39,9 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [currentKeys, setCurrentKeys] = useState<string>("");
   const [originalBinding, setOriginalBinding] = useState<string>("");
+  const [activeConflict, setActiveConflict] = useState<ShortcutConflict | null>(
+    null,
+  );
   const shortcutRef = useRef<HTMLDivElement | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
   // Use a ref to track currentKeys for the event handler (avoids stale closure)
@@ -51,6 +56,75 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
   const osType = useOsType();
 
   const bindings = getSetting("bindings") || {};
+
+  const refreshConflict = useCallback(async () => {
+    const current = bindings[shortcutId]?.current_binding;
+    if (!current) {
+      setActiveConflict(null);
+      return;
+    }
+    try {
+      const result = await commands.checkBindingConflict(shortcutId, current);
+      if (result.status === "ok") {
+        setActiveConflict(result.data);
+      }
+    } catch {
+      // Non-fatal: conflict UI is advisory.
+    }
+  }, [bindings, shortcutId]);
+
+  useEffect(() => {
+    void refreshConflict();
+  }, [refreshConflict]);
+
+  const restoreRecommended = useCallback(async () => {
+    try {
+      const recommended = await commands.getRecommendedBinding(shortcutId);
+      if (recommended.status !== "ok" || !recommended.data) {
+        toast.error(t("settings.general.shortcut.errors.restore"));
+        return;
+      }
+      await updateBinding(shortcutId, recommended.data);
+      setActiveConflict(null);
+      toast.success(
+        t("settings.general.shortcut.conflict.restoreRecommended"),
+      );
+    } catch (error) {
+      console.error("Failed to restore recommended binding:", error);
+      toast.error(t("settings.general.shortcut.errors.restore"));
+    }
+  }, [shortcutId, updateBinding, t]);
+
+  const showSetError = useCallback(
+    (error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      const conflict =
+        error && typeof error === "object" && "conflict" in error
+          ? (error as BindingError).conflict
+          : null;
+
+      if (conflict?.recommended_binding) {
+        toast.error(message, {
+          action: {
+            label: t("settings.general.shortcut.conflict.restoreRecommended"),
+            onClick: () => {
+              void restoreRecommended();
+            },
+          },
+        });
+        setActiveConflict(conflict);
+        return;
+      }
+
+      toast.error(
+        t("settings.general.shortcut.errors.set", {
+          error: message,
+        }),
+      );
+    },
+    [restoreRecommended, t],
+  );
 
   // Handle cancellation
   const cancelRecording = useCallback(async () => {
@@ -94,13 +168,10 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       const commitAndStop = async (keysToCommit: string) => {
         try {
           await updateBinding(shortcutId, keysToCommit);
+          setActiveConflict(null);
         } catch (error) {
           console.error("Failed to change binding:", error);
-          toast.error(
-            t("settings.general.shortcut.errors.set", {
-              error: String(error),
-            }),
-          );
+          showSetError(error);
 
           // Reset to original binding on error
           if (originalBinding) {
@@ -187,6 +258,7 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
     originalBinding,
     updateBinding,
     cancelRecording,
+    showSetError,
     t,
   ]);
 
@@ -314,6 +386,13 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
     binding.description,
   );
 
+  const otherActionLabel = activeConflict
+    ? t(
+        `settings.general.shortcut.conflict.other.${activeConflict.other_action_id}`,
+        activeConflict.other_action_id,
+      )
+    : "";
+
   return (
     <SettingContainer
       title={translatedName}
@@ -323,26 +402,59 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       disabled={disabled}
       layout="horizontal"
     >
-      <div className="flex items-center space-x-1">
-        {isRecording ? (
-          <div
-            ref={shortcutRef}
-            className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
-          >
-            {formatCurrentKeys()}
-          </div>
-        ) : (
-          <div
-            className="px-2 py-1 text-sm font-semibold bg-mid-gray/10 border border-mid-gray/80 hover:bg-logo-primary/10 rounded-md cursor-pointer hover:border-logo-primary"
-            onClick={startRecording}
-          >
-            {formatKeyCombination(binding.current_binding, osType)}
+      <div className="flex flex-col items-end gap-1.5">
+        <div className="flex items-center space-x-1">
+          {isRecording ? (
+            <div
+              ref={shortcutRef}
+              className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
+            >
+              {formatCurrentKeys()}
+            </div>
+          ) : (
+            <div
+              className={`px-2 py-1 text-sm font-semibold border rounded-md cursor-pointer ${
+                activeConflict
+                  ? "bg-red-500/10 border-red-500/80 hover:bg-red-500/15"
+                  : "bg-mid-gray/10 border-mid-gray/80 hover:bg-logo-primary/10 hover:border-logo-primary"
+              }`}
+              onClick={startRecording}
+            >
+              {formatKeyCombination(binding.current_binding, osType)}
+            </div>
+          )}
+          <ResetButton
+            onClick={() => resetBinding(shortcutId)}
+            disabled={isUpdating(`binding_${shortcutId}`)}
+          />
+        </div>
+        {activeConflict && !isRecording && (
+          <div className="max-w-xs text-right text-xs text-red-600 dark:text-red-400">
+            <p>
+              {t("settings.general.shortcut.conflict.warning", {
+                other: otherActionLabel,
+                binding: formatKeyCombination(
+                  activeConflict.other_binding,
+                  osType,
+                ),
+              })}
+            </p>
+            {activeConflict.recommended_binding && (
+              <button
+                type="button"
+                className="mt-1 font-medium underline underline-offset-2 hover:no-underline"
+                onClick={() => void restoreRecommended()}
+              >
+                {t("settings.general.shortcut.conflict.restoreRecommended")}
+                {": "}
+                {formatKeyCombination(
+                  activeConflict.recommended_binding,
+                  osType,
+                )}
+              </button>
+            )}
           </div>
         )}
-        <ResetButton
-          onClick={() => resetBinding(shortcutId)}
-          disabled={isUpdating(`binding_${shortcutId}`)}
-        />
       </div>
     </SettingContainer>
   );

@@ -21,6 +21,22 @@ async resetBinding(id: string) : Promise<Result<BindingResponse, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async checkBindingConflict(id: string, binding: string) : Promise<Result<ShortcutConflict | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_binding_conflict", { id, binding }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getRecommendedBinding(id: string) : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_recommended_binding", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changePttSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_ptt_setting", { enabled }) };
@@ -1007,7 +1023,9 @@ overlay_style?: OverlayStyle }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type AutoSubmitKey = "enter" | "ctrl_enter" | "cmd_enter"
 export type AvailableAccelerators = { transcribe: string[]; ort: string[]; gpu_devices: GpuDeviceOption[] }
-export type BindingResponse = { success: boolean; binding: ShortcutBinding | null; error: string | null }
+export type ConflictKind = "exact" | "prefix"
+export type ShortcutConflict = { action_id: string; other_action_id: string; binding: string; other_binding: string; kind: ConflictKind; recommended_binding: string | null }
+export type BindingResponse = { success: boolean; binding: ShortcutBinding | null; error: string | null; conflict?: ShortcutConflict | null }
 export type ClipboardHandling = "dont_modify" | "copy_to_clipboard"
 export type CustomSounds = { start: boolean; stop: boolean }
 export type EngineType =
@@ -1139,7 +1157,27 @@ export type StreamPhaseEvent = { phase: StreamPhase;
 /**
  * Present only when `phase` is `Working`.
  */
-kind?: StreamWorkKind | null }
+kind?: StreamWorkKind | null;
+/**
+ * Optional language code (e.g. `ru`) for translating labels.
+ */
+target_language?: string | null;
+/**
+ * Optional human-readable language name (e.g. `Russian`).
+ */
+target_language_name?: string | null;
+/**
+ * Optional model id when verifying / dual-model work is active.
+ */
+model_id?: string | null;
+/**
+ * Optional step index for multi-step work (1-based).
+ */
+step?: number | null;
+/**
+ * Optional total steps for multi-step work.
+ */
+step_total?: number | null }
 /**
  * Live transcription snapshot emitted to the overlay during a streaming run.
  * `committed` is the append-only, flicker-free prefix; `tentative` is the
@@ -1149,7 +1187,7 @@ export type StreamTextEvent = { committed: string; tentative: string }
 /**
  * Semantic kind of "working" phase, used to localize the spinner label.
  */
-export type StreamWorkKind = "transcribing" | "polishing"
+export type StreamWorkKind = "transcribing" | "polishing" | "translating" | "verifying" | "post_processing"
 /**
  * UI appearance mode. `System` follows the OS `prefers-color-scheme`; `Light`
  * and `Dark` force one of the two palettes Handy already ships.

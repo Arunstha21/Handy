@@ -152,6 +152,30 @@ function App() {
     };
   }, [t]);
 
+  // Post-processing failed but original transcript was still pasted.
+  useEffect(() => {
+    const unlisten = listen<string>("post-process-error", (event) => {
+      toast.warning(t("errors.postProcessFailedTitle"), {
+        description: event.payload || t("errors.postProcessFailed"),
+      });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [t]);
+
+  // Dual-model verification produced low agreement or a fallback selection.
+  useEffect(() => {
+    const unlisten = listen<string>("verification-warning", (event) => {
+      toast.message(t("errors.verificationWarningTitle"), {
+        description: event.payload,
+      });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [t]);
+
   // Listen for model loading failures and show a toast
   useEffect(() => {
     const unlisten = listen<ModelStateEvent>("model-state-changed", (event) => {

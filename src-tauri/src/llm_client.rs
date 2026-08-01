@@ -170,11 +170,18 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     Ok(headers)
 }
 
-/// Create an HTTP client with provider-specific headers
+/// Overall request timeout for chat completions (connect + response headers + body).
+const CHAT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// TCP connect timeout — fail fast on unreachable hosts.
+const CHAT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Create an HTTP client with provider-specific headers and explicit timeouts.
 fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwest::Client, String> {
     let headers = build_headers(provider, api_key)?;
     reqwest::Client::builder()
         .default_headers(headers)
+        .timeout(CHAT_REQUEST_TIMEOUT)
+        .connect_timeout(CHAT_CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }

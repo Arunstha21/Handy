@@ -77,10 +77,13 @@ pub enum StreamPhase {
 
 /// Semantic kind of "working" phase, used to localize the spinner label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum StreamWorkKind {
     Transcribing,
     Polishing,
+    Translating,
+    Verifying,
+    PostProcessing,
 }
 
 /// Immutable output intent captured for one recording. Keeping this separate
@@ -100,11 +103,14 @@ pub struct TranscriptCandidate {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionMethod {
     PrimaryAgreement,
     PrimaryFallback,
     SecondaryFallback,
+    /// Primary retained despite low agreement; UI should surface a warning.
+    LowAgreementWarning,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +122,43 @@ pub struct ResolvedTranscript {
     pub candidates: Vec<TranscriptCandidate>,
 }
 
+/// Compact verification summary for history, overlay, and diagnostics.
+/// Candidate full text is intentionally omitted unless debug diagnostics are on.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct VerificationReport {
+    pub primary_model_id: String,
+    pub secondary_model_id: String,
+    pub selected_model_id: String,
+    pub agreement_score: f32,
+    pub method: ResolutionMethod,
+    pub primary_elapsed_ms: u64,
+    pub secondary_elapsed_ms: u64,
+    pub primary_error: Option<String>,
+    pub secondary_error: Option<String>,
+    pub low_agreement: bool,
+}
+
+impl ResolvedTranscript {
+    pub fn to_verification_report(&self) -> Option<VerificationReport> {
+        let primary = self.candidates.first()?;
+        let secondary = self.candidates.get(1)?;
+        let low_agreement = matches!(self.method, ResolutionMethod::LowAgreementWarning)
+            || (self.agreement_score > 0.0 && self.agreement_score < 0.80);
+        Some(VerificationReport {
+            primary_model_id: primary.model_id.clone(),
+            secondary_model_id: secondary.model_id.clone(),
+            selected_model_id: self.selected_model_id.clone(),
+            agreement_score: self.agreement_score,
+            method: self.method.clone(),
+            primary_elapsed_ms: primary.elapsed_ms,
+            secondary_elapsed_ms: secondary.elapsed_ms,
+            primary_error: primary.error.clone(),
+            secondary_error: secondary.error.clone(),
+            low_agreement,
+        })
+    }
+}
+
 fn normalized_transcript(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -123,11 +166,15 @@ fn normalized_transcript(text: &str) -> String {
         .to_lowercase()
 }
 
+/// Agreement threshold: at or above this score, models are considered to agree.
+pub const AGREEMENT_HIGH_THRESHOLD: f32 = 0.80;
+
 /// Resolve two model outputs conservatively. Agreement keeps the primary
 /// formatting; disagreement keeps a complete primary sentence rather than
-/// manufacturing a potentially incoherent word-by-word splice. This is the
-/// safe baseline for dual inference; benchmark-backed voting can replace it
-/// without changing the inference contract.
+/// manufacturing a potentially incoherent word-by-word splice, but marks the
+/// result with [`ResolutionMethod::LowAgreementWarning`] so the UI can surface
+/// that verification did not confirm the primary. Never splices words from
+/// both transcripts.
 pub fn resolve_transcript_candidates(
     candidates: Vec<TranscriptCandidate>,
 ) -> Result<ResolvedTranscript> {
@@ -146,19 +193,22 @@ pub fn resolve_transcript_candidates(
             let secondary_normalized = normalized_transcript(&secondary.text);
             let agreement_score =
                 strsim::normalized_levenshtein(&primary_normalized, &secondary_normalized) as f32;
+            let method = if agreement_score >= AGREEMENT_HIGH_THRESHOLD {
+                ResolutionMethod::PrimaryAgreement
+            } else {
+                // Keep primary text (no splicing) but expose low agreement.
+                ResolutionMethod::LowAgreementWarning
+            };
             return Ok(ResolvedTranscript {
                 text: primary.text.clone(),
                 selected_model_id: primary.model_id.clone(),
                 agreement_score,
-                method: if agreement_score >= 0.80 {
-                    ResolutionMethod::PrimaryAgreement
-                } else {
-                    ResolutionMethod::PrimaryFallback
-                },
+                method,
                 candidates,
             });
         }
 
+        // Secondary failed or empty — primary survives with a fallback marker.
         return Ok(ResolvedTranscript {
             text: primary.text.clone(),
             selected_model_id: primary.model_id.clone(),
@@ -190,6 +240,21 @@ pub struct StreamPhaseEvent {
     /// Present only when `phase` is `Working`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<StreamWorkKind>,
+    /// Optional language code (e.g. `ru`) for translating labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_language: Option<String>,
+    /// Optional human-readable language name (e.g. `Russian`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_language_name: Option<String>,
+    /// Optional model id when verifying / dual-model work is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Optional step index for multi-step work (1-based).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    /// Optional total steps for multi-step work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_total: Option<u32>,
 }
 
 /// Commands sent to the streaming worker thread. Audio frames and the finalize
@@ -1201,9 +1266,27 @@ impl TranscriptionManager {
 
     /// Emit a working-phase event to the streaming overlay (spinner + label).
     pub fn emit_stream_working(&self, kind: StreamWorkKind) {
+        self.emit_stream_working_detail(kind, None, None, None, None, None);
+    }
+
+    /// Emit a working-phase event with optional translation/verification context.
+    pub fn emit_stream_working_detail(
+        &self,
+        kind: StreamWorkKind,
+        target_language: Option<String>,
+        target_language_name: Option<String>,
+        model_id: Option<String>,
+        step: Option<u32>,
+        step_total: Option<u32>,
+    ) {
         let _ = StreamPhaseEvent {
             phase: StreamPhase::Working,
             kind: Some(kind),
+            target_language,
+            target_language_name,
+            model_id,
+            step,
+            step_total,
         }
         .emit(&self.app_handle);
     }
@@ -2245,6 +2328,59 @@ mod tests {
             resolved.method,
             ResolutionMethod::SecondaryFallback
         ));
+    }
+
+    #[test]
+    fn resolver_keeps_primary_with_low_agreement_warning_on_disagreement() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: "The quick brown fox".to_string(),
+                elapsed_ms: 10,
+                error: None,
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: "Completely different sentence here".to_string(),
+                elapsed_ms: 12,
+                error: None,
+            },
+        ])
+        .expect("disagreement should still resolve");
+
+        assert_eq!(resolved.text, "The quick brown fox");
+        assert_eq!(resolved.selected_model_id, "primary");
+        assert!(matches!(
+            resolved.method,
+            ResolutionMethod::LowAgreementWarning
+        ));
+        assert!(resolved.agreement_score < 0.80);
+        let report = resolved
+            .to_verification_report()
+            .expect("report should be available");
+        assert!(report.low_agreement);
+    }
+
+    #[test]
+    fn resolver_primary_fallback_when_secondary_fails() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: "Primary only".to_string(),
+                elapsed_ms: 10,
+                error: None,
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: String::new(),
+                elapsed_ms: 12,
+                error: Some("secondary failed".to_string()),
+            },
+        ])
+        .expect("primary should survive secondary failure");
+
+        assert_eq!(resolved.text, "Primary only");
+        assert!(matches!(resolved.method, ResolutionMethod::PrimaryFallback));
     }
 
     #[test]

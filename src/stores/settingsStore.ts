@@ -369,7 +369,13 @@ export const useSettingsStore = create<SettingsStore>()(
 
         // Check if the binding change was successful
         if (!result.data.success) {
-          throw new Error(result.data.error || "Failed to update binding");
+          const err = new Error(
+            result.data.error || "Failed to update binding",
+          ) as Error & { conflict?: (typeof result.data)["conflict"] };
+          if (result.data.conflict) {
+            err.conflict = result.data.conflict;
+          }
+          throw err;
         }
       } catch (error) {
         console.error(`Failed to update binding ${id}:`, error);

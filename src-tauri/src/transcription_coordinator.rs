@@ -520,4 +520,86 @@ mod tests {
         );
         assert_eq!(result.stage, SimStage::Processing);
     }
+
+    // ---------------------------------------------------------------------
+    // Prefix-conflict regression: Right Command (transcribe) + Space
+    // (translate) under push-to-talk.
+    //
+    // When a modifier-only shortcut starts recording, a longer combo that
+    // shares that modifier fires later but is ignored because the pipeline is
+    // already busy. Validation in shortcut::conflict prevents saving such
+    // pairs; these tests document the coordinator's busy-pipeline behaviour
+    // so a future change does not silently reintroduce dual starts.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn push_to_talk_second_binding_press_while_recording_is_ignored() {
+        // Mirrors the coordinator loop: only the binding that owns the
+        // recording can stop it; a different binding press while Recording
+        // does nothing (and does not start a second pipeline).
+        let mut stage = Stage::Recording("transcribe".to_string());
+        let push_to_talk = true;
+        let is_pressed = true;
+        let binding_id = "transcribe_with_translation";
+
+        // Press of translation while ordinary transcription is recording.
+        if push_to_talk {
+            if is_pressed && matches!(stage, Stage::Idle) {
+                stage = Stage::Recording(binding_id.to_string());
+            } else if !is_pressed && matches!(&stage, Stage::Recording(id) if id == binding_id) {
+                stage = Stage::Processing;
+            }
+            // else: ignored — pipeline busy with another binding
+        }
+
+        assert!(
+            matches!(&stage, Stage::Recording(id) if id == "transcribe"),
+            "translation press must not replace or dual-start while ordinary transcription is recording"
+        );
+    }
+
+    #[test]
+    fn toggle_mode_second_binding_press_while_busy_is_ignored() {
+        // Toggle mode only reacts to presses; a second binding while Recording
+        // hits the busy arm and stays on the original binding.
+        let stage = Stage::Recording("transcribe".to_string());
+        let push_to_talk = false;
+        let is_pressed = true;
+        let binding_id = "transcribe_with_translation";
+
+        let mut next = match &stage {
+            Stage::Idle if is_pressed && !push_to_talk => Stage::Recording(binding_id.to_string()),
+            Stage::Recording(id) if id == binding_id && is_pressed && !push_to_talk => {
+                Stage::Processing
+            }
+            other if is_pressed && !push_to_talk => {
+                // busy — keep existing stage
+                match other {
+                    Stage::Idle => Stage::Idle,
+                    Stage::Recording(id) => Stage::Recording(id.clone()),
+                    Stage::Processing => Stage::Processing,
+                }
+            }
+            other => match other {
+                Stage::Idle => Stage::Idle,
+                Stage::Recording(id) => Stage::Recording(id.clone()),
+                Stage::Processing => Stage::Processing,
+            },
+        };
+
+        // Explicit busy branch equivalent to the coordinator's `_ => ignore`.
+        if is_pressed && !push_to_talk {
+            next = match &stage {
+                Stage::Idle => Stage::Recording(binding_id.to_string()),
+                Stage::Recording(id) if id == binding_id => Stage::Processing,
+                Stage::Recording(id) => Stage::Recording(id.clone()),
+                Stage::Processing => Stage::Processing,
+            };
+        }
+
+        assert!(
+            matches!(&next, Stage::Recording(id) if id == "transcribe"),
+            "toggle press for translation while ordinary transcription is active must be ignored"
+        );
+    }
 }

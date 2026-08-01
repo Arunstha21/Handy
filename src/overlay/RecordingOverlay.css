@@ -201,26 +201,36 @@
   width: var(--ov-work-w);
 }
 
-/* Notch / Dynamic Island treatment. It is deliberately pure black and flush
-   at the top: a bordered floating pill would read as a separate window instead
-   of a continuation of the MacBook camera housing. */
+/* Notch / Dynamic Island treatment. Pure black and flush at the top so the
+   card continues the camera housing. Curved lower corners + slight side
+   shoulder rounding keep it from reading as a rectangular slab. Only applied
+   when the backend reports notch_attached (never on external displays). */
 .ov-stage.notch .scard {
   width: var(--ov-notch-pill-w);
   background: #050505;
   border: 0;
-  border-radius: 0 0 24px 24px;
+  /* Top stays square against the bezel; bottom and soft side shoulders form
+     the island silhouette. */
+  border-radius: 0 0 22px 22px;
+  box-shadow:
+    -14px 0 0 -6px #050505,
+    14px 0 0 -6px #050505;
   transition:
-    width 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-radius 360ms cubic-bezier(0.22, 1, 0.36, 1);
+    width 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .ov-stage.notch .scard.open {
   width: var(--ov-notch-open-w);
-  border-radius: 0 0 26px 26px;
+  border-radius: 0 0 24px 24px;
+  box-shadow:
+    -16px 0 0 -6px #050505,
+    16px 0 0 -6px #050505;
 }
 .ov-stage.notch .scard.working,
 .ov-stage.notch .scard.compact.cworking {
   width: var(--ov-notch-work-w);
-  border-radius: 0 0 22px 22px;
+  border-radius: 0 0 20px 20px;
 }
 .ov-stage.notch .scard.compact {
   width: var(--ov-notch-rest-w);
@@ -459,8 +469,22 @@
   .stext,
   .stimer,
   .swave i,
-  .sx {
-    animation: none;
-    transition-duration: 1ms;
+  .sx,
+  .sspinner,
+  .sdot,
+  .scaret {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .sspinner {
+    /* Static indicator instead of spinning */
+    border-top-color: inherit;
+    opacity: 0.85;
+  }
+
+  .scaret {
+    /* No blink under reduced motion */
+    opacity: 1;
   }
 }

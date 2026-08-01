@@ -63,15 +63,107 @@ const OVERLAY_NOTCH_HEIGHT: f64 = 52.0;
 const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 508.0;
 const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 132.0;
 
+/// Effective overlay placement for the current display and user preference.
+/// Frontend applies notch styling only for [`EffectivePlacement::NotchAttached`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectivePlacement {
+    NotchAttached,
+    TopFallback,
+    Top,
+    Bottom,
+}
+
+impl EffectivePlacement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EffectivePlacement::NotchAttached => "notch_attached",
+            EffectivePlacement::TopFallback => "top_fallback",
+            EffectivePlacement::Top => "top",
+            EffectivePlacement::Bottom => "bottom",
+        }
+    }
+
+    pub fn uses_notch_geometry(self) -> bool {
+        matches!(self, EffectivePlacement::NotchAttached)
+    }
+}
+
+/// Resolve placement from settings + whether the cursor monitor actually has a notch.
+fn resolve_effective_placement(app_handle: &AppHandle) -> EffectivePlacement {
+    let settings = settings::get_settings(app_handle);
+    match settings.overlay_position {
+        OverlayPosition::Bottom => EffectivePlacement::Bottom,
+        OverlayPosition::Top => EffectivePlacement::Top,
+        OverlayPosition::Notch => {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(monitor) = get_monitor_with_cursor(app_handle) {
+                    if macos_notch_geometry(&monitor).is_some() {
+                        return EffectivePlacement::NotchAttached;
+                    }
+                }
+                EffectivePlacement::TopFallback
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                EffectivePlacement::TopFallback
+            }
+        }
+    }
+}
+
+/// Clamp measured housing width into a usable island width with safe min/max.
+#[cfg(target_os = "macos")]
+fn notch_island_width(housing_width: Option<f64>, streaming: bool) -> f64 {
+    // Housing is often ~150–200pt; the island should extend slightly past it.
+    let base = housing_width.unwrap_or(if streaming {
+        OVERLAY_NOTCH_STREAM_WIDTH
+    } else {
+        OVERLAY_NOTCH_WIDTH
+    });
+    let padded = base + if streaming { 120.0 } else { 80.0 };
+    let (min_w, max_w) = if streaming {
+        (360.0, OVERLAY_NOTCH_STREAM_WIDTH)
+    } else {
+        (240.0, OVERLAY_NOTCH_WIDTH)
+    };
+    padded.clamp(min_w, max_w)
+}
+
 /// Overlay window size (logical) for a given UI state.
 fn overlay_dimensions(app_handle: &AppHandle, state: &str) -> (f64, f64) {
-    let is_notch = settings::get_settings(app_handle).overlay_position == OverlayPosition::Notch;
+    let placement = resolve_effective_placement(app_handle);
+    let is_notch = placement.uses_notch_geometry();
+    let streaming = state == "streaming";
 
-    match (is_notch, state == "streaming") {
-        (true, true) => (OVERLAY_NOTCH_STREAM_WIDTH, OVERLAY_NOTCH_STREAM_HEIGHT),
-        (true, false) => (OVERLAY_NOTCH_WIDTH, OVERLAY_NOTCH_HEIGHT),
-        (false, true) => (OVERLAY_STREAM_WIDTH, OVERLAY_STREAM_HEIGHT),
-        (false, false) => (OVERLAY_WIDTH, OVERLAY_HEIGHT),
+    if is_notch {
+        #[cfg(target_os = "macos")]
+        {
+            let housing = get_monitor_with_cursor(app_handle)
+                .and_then(|m| macos_notch_geometry(&m))
+                .and_then(|g| g.housing_width);
+            let width = notch_island_width(housing, streaming);
+            let height = if streaming {
+                OVERLAY_NOTCH_STREAM_HEIGHT
+            } else {
+                OVERLAY_NOTCH_HEIGHT
+            };
+            return (width, height);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return if streaming {
+                (OVERLAY_NOTCH_STREAM_WIDTH, OVERLAY_NOTCH_STREAM_HEIGHT)
+            } else {
+                (OVERLAY_NOTCH_WIDTH, OVERLAY_NOTCH_HEIGHT)
+            };
+        }
+    }
+
+    if streaming {
+        (OVERLAY_STREAM_WIDTH, OVERLAY_STREAM_HEIGHT)
+    } else {
+        (OVERLAY_WIDTH, OVERLAY_HEIGHT)
     }
 }
 
@@ -245,43 +337,82 @@ fn is_mouse_within_monitor(
         && mouse_y < (monitor_y + monitor_height as i32)
 }
 
-/// Returns the top safe-area inset for the monitor containing the cursor.
+/// Measured macOS camera-housing geometry for the monitor under the cursor.
 ///
-/// NSScreen exposes the camera-housing exclusion as a safe-area inset. The
-/// Tauri monitor already gives us the matching logical origin. The safe-area
-/// inset tells us whether this is a notched display, so the attached card can
-/// begin at the display's top edge. Matching by backing-scaled frame size keeps
-/// this correct when several displays are attached and the cursor moves between
-/// them.
+/// Combines `safeAreaInsets.top` (notch depth) with the gap between the left
+/// and right auxiliary top areas when AppKit exposes them. The island width is
+/// derived from that gap so it tracks the physical housing instead of a fixed
+/// slab size for every MacBook.
 #[cfg(target_os = "macos")]
-fn macos_notch_inset(monitor: &tauri::Monitor) -> Option<f64> {
+#[derive(Debug, Clone, Copy)]
+struct NotchGeometry {
+    /// Top safe-area inset in logical points (notch depth).
+    inset: f64,
+    /// Estimated camera-housing width in logical points, when measurable.
+    housing_width: Option<f64>,
+}
+
+/// Returns notch geometry for the monitor, or `None` when the display has no
+/// camera housing (external monitors, older Macs).
+#[cfg(target_os = "macos")]
+fn macos_notch_geometry(monitor: &tauri::Monitor) -> Option<NotchGeometry> {
     let marker = ObjcMainThreadMarker::new()?;
     let screens = NSScreen::screens(marker);
     let monitor_size = monitor.size();
 
-    let mut best: Option<(f64, f64)> = None;
+    let mut best: Option<(f64, NotchGeometry)> = None;
     for index in 0..screens.count() {
         let screen = screens.objectAtIndex(index);
-        let scale = screen.backingScaleFactor() as f64;
+        let scale = screen.backingScaleFactor();
         let frame = screen.frame();
-        let width = (frame.size.width as f64 * scale).round();
-        let height = (frame.size.height as f64 * scale).round();
+        let width = (frame.size.width * scale).round();
+        let height = (frame.size.height * scale).round();
         let dw = (width - monitor_size.width as f64).abs();
         let dh = (height - monitor_size.height as f64).abs();
         let distance = dw + dh;
-        let inset = screen.safeAreaInsets().top as f64;
+        let inset = screen.safeAreaInsets().top;
+
+        // Estimate housing width from the gap between auxiliary top regions.
+        // auxiliaryTopLeftArea / auxiliaryTopRightArea describe the usable menu-
+        // bar strips on either side of the camera housing on notched Macs.
+        let housing_width = {
+            let left = screen.auxiliaryTopLeftArea();
+            let right = screen.auxiliaryTopRightArea();
+            let left_end = left.origin.x + left.size.width;
+            let right_start = right.origin.x;
+            let gap = right_start - left_end;
+            // Only trust a positive gap that's smaller than half the screen.
+            let frame_w = frame.size.width;
+            if gap > 8.0 && gap < frame_w * 0.5 {
+                Some(gap)
+            } else {
+                None
+            }
+        };
 
         if best.is_none_or(|(best_distance, _)| distance < best_distance) {
-            best = Some((distance, inset));
+            best = Some((
+                distance,
+                NotchGeometry {
+                    inset,
+                    housing_width,
+                },
+            ));
         }
     }
 
-    let (distance, inset) = best?;
+    let (distance, geometry) = best?;
     // A loose tolerance accommodates AppKit/Tauri rounding at scaled
     // resolutions, while preventing an external display from inheriting the
     // MacBook's notch inset.
     let tolerance = 8.0 * monitor.scale_factor();
-    (distance <= tolerance && inset > 0.0).then_some(inset)
+    (distance <= tolerance && geometry.inset > 0.0).then_some(geometry)
+}
+
+/// Back-compat helper: top safe-area inset only.
+#[cfg(target_os = "macos")]
+fn macos_notch_inset(monitor: &tauri::Monitor) -> Option<f64> {
+    macos_notch_geometry(monitor).map(|g| g.inset)
 }
 
 /// Returns overlay position in logical coordinates (points on macOS).
@@ -607,10 +738,16 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
             log::error!("Failed to re-assert recording overlay position: {error}");
         }
 
-        let _ = overlay_window.emit("show-overlay", state);
+        let placement = resolve_effective_placement(app_handle);
+        // Emit state as a plain string for backwards-compatible listeners, and
+        // a separate placement event so the frontend only applies notch CSS when
+        // the current display is actually attached to the camera housing.
+        let _ = overlay_window.emit("show-overlay", &state);
+        let _ = overlay_window.emit("overlay-placement", placement.as_str());
         log::debug!(
-            "overlay '{}': set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
+            "overlay '{}' placement={}: set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
             state,
+            placement.as_str(),
             size_elapsed,
             pos_calc_elapsed,
             set_pos_elapsed,
@@ -637,6 +774,16 @@ pub fn show_transcribing_overlay(app_handle: &AppHandle) {
 /// Shows the processing overlay window
 pub fn show_processing_overlay(app_handle: &AppHandle) {
     show_overlay_state(app_handle, "processing");
+}
+
+/// Shows the translating overlay (dedicated translation action).
+pub fn show_translating_overlay(app_handle: &AppHandle) {
+    show_overlay_state(app_handle, "translating");
+}
+
+/// Shows the dual-model verification overlay.
+pub fn show_verifying_overlay(app_handle: &AppHandle) {
+    show_overlay_state(app_handle, "verifying");
 }
 
 /// Updates the overlay window position based on current settings

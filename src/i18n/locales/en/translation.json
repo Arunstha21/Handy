@@ -181,14 +181,24 @@
             "description": "The keyboard shortcut to cancel the current recording."
           },
           "transcribe_with_post_process": {
-            "name": "Post-Processing Hotkey",
-            "description": "Optional: A dedicated hotkey that always applies AI post-processing to your transcription."
+            "name": "Dedicated post-process shortcut",
+            "description": "Optional: a separate shortcut that always applies AI post-processing. The normal Transcribe shortcut does not post-process unless you use this dedicated binding."
           }
         },
         "errors": {
           "restore": "Failed to restore original shortcut",
           "set": "Failed to set shortcut: {{error}}",
-          "reset": "Failed to reset shortcut to original value"
+          "reset": "Failed to reset shortcut to original value",
+          "conflict": "This shortcut conflicts with another transcription action. A shorter modifier-only binding starts recording before a longer combination can fire."
+        },
+        "conflict": {
+          "warning": "Conflicts with {{other}} ({{binding}}). Choose a different combination or restore the recommended shortcut.",
+          "restoreRecommended": "Restore recommended shortcut",
+          "other": {
+            "transcribe": "Transcribe",
+            "transcribe_with_post_process": "Post-process",
+            "transcribe_with_translation": "Translate"
+          }
         }
       },
       "language": {
@@ -365,9 +375,9 @@
       },
       "dualModel": {
         "label": "Dual-model verification",
-        "description": "Run a second local speech model after recording to compare results. This may use more memory and time.",
+        "description": "Run a second local speech model after recording and compare results. High agreement keeps the primary transcript; low agreement keeps the primary but shows a warning. This doubles inference latency and may use more memory.",
         "secondaryLabel": "Verification model",
-        "secondaryDescription": "Choose a downloaded model that differs from the primary model.",
+        "secondaryDescription": "Choose a downloaded model that differs from the primary model and shares a compatible source language.",
         "selectPlaceholder": "Select a verification model"
       },
       "modelUnload": {
@@ -404,8 +414,10 @@
     },
     "postProcessing": {
       "hotkey": {
-        "title": "Hotkey"
+        "title": "Dedicated post-process shortcut",
+        "description": "This shortcut records and always runs post-processing. Enabling post-processing does not change the normal Transcribe shortcut."
       },
+      "freeModelWarning": "Free OpenRouter models (:free) often have lower availability and daily rate limits. They are not recommended for reliable production use.",
       "api": {
         "title": "API (OpenAI Compatible)",
         "provider": {
@@ -535,8 +547,8 @@
         "description": "Microphone to use when laptop lid is closed"
       },
       "postProcessingToggle": {
-        "label": "Post Processing",
-        "description": "Enable AI-powered text refinement after transcription"
+        "label": "Enable dedicated post-process shortcut",
+        "description": "Registers a separate hotkey that always applies AI post-processing. The normal Transcribe shortcut is unchanged."
       },
       "muteWhileRecording": {
         "label": "Mute While Recording",
@@ -672,7 +684,10 @@
     "modelLoadFailedUnknown": "unknown model",
     "pasteFailedTitle": "Failed to Paste Text",
     "pasteFailed": "Text could not be pasted into the active application.",
-    "transcriptionFailedTitle": "Transcription Failed"
+    "transcriptionFailedTitle": "Transcription Failed",
+    "postProcessFailedTitle": "Post-processing failed",
+    "postProcessFailed": "Post-processing failed; original transcript was used.",
+    "verificationWarningTitle": "Verification note"
   },
   "appLanguage": {
     "title": "Application Language",
@@ -689,7 +704,13 @@
   },
   "overlay": {
     "transcribing": "Transcribing...",
-    "processing": "Processing..."
+    "processing": "Processing...",
+    "translating": "Translating...",
+    "translatingTo": "Translating to {{language}}...",
+    "verifying": "Verifying...",
+    "verifyingStep": "Verifying {{step}}/{{total}}...",
+    "postProcessing": "Post-processing...",
+    "cancel": "Cancel"
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} may be blocking 1 shortcut",

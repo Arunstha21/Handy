@@ -12,11 +12,88 @@ import type {
 import i18n, { syncLanguageFromSettings } from "@/i18n";
 import { getLanguageDirection } from "@/lib/utils/rtl";
 
-type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
+type OverlayState =
+  | "recording"
+  | "streaming"
+  | "transcribing"
+  | "processing"
+  | "translating"
+  | "verifying";
+
+/** Effective placement from the backend — notch styling only for NotchAttached. */
+type OverlayPlacement =
+  | "notch_attached"
+  | "top_fallback"
+  | "top"
+  | "bottom";
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
 const WAVE_BARS = 9;
+
+function workLabelFromPhase(
+  t: (key: string, opts?: Record<string, unknown>) => string,
+  kind: StreamWorkKind,
+  detail: StreamPhaseEvent | null,
+): string {
+  switch (kind) {
+    case "translating": {
+      const language =
+        detail?.target_language_name ||
+        detail?.target_language ||
+        undefined;
+      return language
+        ? t("overlay.translatingTo", { language })
+        : t("overlay.translating");
+    }
+    case "verifying": {
+      if (detail?.step != null && detail?.step_total != null) {
+        return t("overlay.verifyingStep", {
+          step: detail.step,
+          total: detail.step_total,
+        });
+      }
+      return t("overlay.verifying");
+    }
+    case "post_processing":
+    case "polishing":
+      return t("overlay.postProcessing");
+    case "transcribing":
+    default:
+      return t("overlay.transcribing");
+  }
+}
+
+function workLabelFromState(
+  t: (key: string, opts?: Record<string, unknown>) => string,
+  state: OverlayState,
+): string {
+  switch (state) {
+    case "processing":
+      return t("overlay.postProcessing");
+    case "translating":
+      return t("overlay.translating");
+    case "verifying":
+      return t("overlay.verifying");
+    case "transcribing":
+    default:
+      return t("overlay.transcribing");
+  }
+}
+
+/** Map settings preference + optional backend placement into CSS stage class. */
+function stageClass(placement: OverlayPlacement): string {
+  switch (placement) {
+    case "notch_attached":
+      return "notch";
+    case "top_fallback":
+    case "top":
+      return "top";
+    case "bottom":
+    default:
+      return "bottom";
+  }
+}
 
 const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
@@ -29,15 +106,13 @@ const RecordingOverlay: React.FC = () => {
   });
   const [phase, setPhase] = useState<StreamPhase>("listening");
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
+  const [phaseDetail, setPhaseDetail] = useState<StreamPhaseEvent | null>(null);
   const [elapsed, setElapsed] = useState(0);
   // Bumped on each new streaming session so the Live card remounts fresh (replays
   // the pop-in, and never animates in from the previous panel's open size).
   const [session, setSession] = useState(0);
-  // Overlay placement. The Live panel grows downward from Top/Notch and upward
-  // from Bottom.
-  const [position, setPosition] = useState<"top" | "bottom" | "notch">(
-    "bottom",
-  );
+  // Effective placement from the last show-overlay / placement event.
+  const [placement, setPlacement] = useState<OverlayPlacement>("bottom");
   // True once live text overflows the cap. A top overlay fades its top edge only
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
@@ -54,22 +129,43 @@ const RecordingOverlay: React.FC = () => {
     const setupEventListeners = async () => {
       const unlistenShow = await listen("show-overlay", async (event) => {
         await syncLanguageFromSettings();
-        // The Live panel flows downward from a top overlay and upward from a
-        // bottom one; read the placement so the layout can flip to match.
-        try {
-          const settings = await commands.getAppSettings();
-          if (settings.status === "ok") {
-            const configuredPosition = settings.data.overlay_position;
-            setPosition(
-              configuredPosition === "top" || configuredPosition === "notch"
-                ? configuredPosition
-                : "bottom",
-            );
+        // Prefer backend effective placement when present (object payload).
+        // Older path sends a plain state string.
+        const payload = event.payload as
+          | OverlayState
+          | { state: OverlayState; placement?: OverlayPlacement };
+
+        let overlayState: OverlayState;
+        if (typeof payload === "string") {
+          overlayState = payload;
+          // Fall back to settings preference; notch is only applied when the
+          // backend later confirms notch_attached via overlay-placement.
+          try {
+            const settings = await commands.getAppSettings();
+            if (settings.status === "ok") {
+              const configured = settings.data.overlay_position;
+              if (configured === "notch") {
+                // Do not force notch styling until geometry confirms attachment.
+                // Default to top until placement event arrives.
+                setPlacement((prev) =>
+                  prev === "notch_attached" ? prev : "top_fallback",
+                );
+              } else if (configured === "top") {
+                setPlacement("top");
+              } else {
+                setPlacement("bottom");
+              }
+            }
+          } catch {
+            // Keep the previous/default placement if settings can't be read.
           }
-        } catch {
-          // Keep the previous/default placement if settings can't be read.
+        } else {
+          overlayState = payload.state;
+          if (payload.placement) {
+            setPlacement(payload.placement);
+          }
         }
-        const overlayState = event.payload as OverlayState;
+
         setState(overlayState);
         if (overlayState === "recording" || overlayState === "streaming") {
           setStreamText({ committed: "", tentative: "" });
@@ -77,11 +173,19 @@ const RecordingOverlay: React.FC = () => {
         if (overlayState === "streaming") {
           setPhase("listening");
           setWorkKind("transcribing");
+          setPhaseDetail(null);
           setElapsed(0);
           setSession((s) => s + 1); // remount the card fresh for this session
         }
         setIsVisible(true);
       });
+
+      const unlistenPlacement = await listen<OverlayPlacement>(
+        "overlay-placement",
+        (event) => {
+          setPlacement(event.payload);
+        },
+      );
 
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
@@ -106,11 +210,13 @@ const RecordingOverlay: React.FC = () => {
       const unlistenPhase = await events.streamPhaseEvent.listen((event) => {
         const payload: StreamPhaseEvent = event.payload;
         setPhase(payload.phase);
+        setPhaseDetail(payload);
         if (payload.kind) setWorkKind(payload.kind);
       });
 
       return () => {
         unlistenShow();
+        unlistenPlacement();
         unlistenHide();
         unlistenLevel();
         unlistenStream();
@@ -154,6 +260,8 @@ const RecordingOverlay: React.FC = () => {
   const fmtTime = (s: number) =>
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
+  const stage = stageClass(placement);
+
   // ---- Shared building blocks (one visual language for every overlay form) ----
   const waveform = (
     <div className="swave">
@@ -171,7 +279,7 @@ const RecordingOverlay: React.FC = () => {
   const cancelBtn = (
     <button
       className="sx"
-      aria-label="cancel"
+      aria-label={t("overlay.cancel")}
       onClick={() => commands.cancelOperation()}
     >
       <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -225,7 +333,7 @@ const RecordingOverlay: React.FC = () => {
     const collapsed = working && !hasText;
 
     return (
-      <div dir={direction} className={`ov-stage ${position}`}>
+      <div dir={direction} className={`ov-stage ${stage}`}>
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
@@ -252,12 +360,7 @@ const RecordingOverlay: React.FC = () => {
             </div>
           </div>
           {working
-            ? workingRow(
-                workKind === "polishing"
-                  ? t("overlay.processing")
-                  : t("overlay.transcribing"),
-                true,
-              )
+            ? workingRow(workLabelFromPhase(t, workKind, phaseDetail), true)
             : listeningRow(open, true)}
         </div>
       </div>
@@ -265,18 +368,18 @@ const RecordingOverlay: React.FC = () => {
   }
 
   // ---- Minimal overlay: exactly one row at a time — waveform (recording), or a
-  // spinner + label (transcribing / processing). Never both. The pill animates its
-  // width between them; the cancel button is in both rows so it stays put.
-  const working = state === "transcribing" || state === "processing";
-  const workLabel =
-    state === "processing"
-      ? t("overlay.processing")
-      : t("overlay.transcribing");
+  // spinner + label (transcribing / processing / translating / verifying).
+  const working =
+    state === "transcribing" ||
+    state === "processing" ||
+    state === "translating" ||
+    state === "verifying";
+  const workLabel = workLabelFromState(t, state);
 
   return (
     <div
       dir={direction}
-      className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      className={`ov-stage ${stage} ov-fade ${isVisible ? "show" : ""}`}
     >
       <div
         className={`scard compact ${working && isVisible ? "cworking" : ""}`}
