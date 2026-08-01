@@ -1603,9 +1603,12 @@ impl TranscriptionManager {
         // Apply fuzzy word correction if custom words are configured — UNLESS the
         // words were already handed to the model as an initial prompt (whisper
         // family). We don't pass a prompt to non-whisper models (it requires the
-        // whisper-kind run extension), so they still get fuzzy correction here,
-        // same as the ONNX engines.
-        let filtered_result = post_process_transcription_text(result, &settings, model_is_whisper);
+        // whisper-kind run extension), or to a Whisper model that does not
+        // advertise initial-prompt support, so those paths still get fuzzy
+        // correction here, same as the ONNX engines.
+        let initial_prompt_applied = model_is_whisper && model_takes_initial_prompt;
+        let filtered_result =
+            post_process_transcription_text(result, &settings, initial_prompt_applied);
 
         let et = std::time::Instant::now();
         let translation_note = if matches!(task, TranscriptionTask::Translate { .. }) {
