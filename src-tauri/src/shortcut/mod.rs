@@ -23,8 +23,8 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
     self, get_settings, AutoSubmitKey, ClipboardHandling, KeyboardImplementation, LLMPrompt,
-    OverlayPosition, OverlayStyle, PasteMethod, ShortcutBinding, SoundTheme, Theme, TypingTool,
-    APPLE_INTELLIGENCE_PROVIDER_ID,
+    OverlayPosition, OverlayStyle, PasteMethod, ShortcutBinding, SoundTheme, Theme,
+    TranslationMode, TypingTool, APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -638,6 +638,20 @@ pub fn change_translation_target_language_setting(
     }
     let mut settings = settings::get_settings(&app);
     settings.translation_target_language = language;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_translation_mode_setting(app: AppHandle, mode: String) -> Result<(), String> {
+    let parsed = match mode.trim() {
+        "direct" => TranslationMode::Direct,
+        "balanced" => TranslationMode::Balanced,
+        other => return Err(format!("Invalid translation mode: {other}")),
+    };
+    let mut settings = settings::get_settings(&app);
+    settings.translation_mode = parsed;
     settings::write_settings(&app, settings);
     Ok(())
 }

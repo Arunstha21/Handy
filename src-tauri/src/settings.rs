@@ -122,6 +122,20 @@ pub enum OverlayPosition {
     Bottom,
 }
 
+/// How the dedicated translation shortcut produces its output.
+///
+/// `Direct` delegates translation to a speech model such as Canary. `Balanced`
+/// keeps speech recognition and text translation separate: Handy transcribes
+/// locally first, then sends the transcript plus the user's context/glossary to
+/// the configured text-model provider.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationMode {
+    Direct,
+    #[default]
+    Balanced,
+}
+
 /// Which recording overlay to display. `Minimal` and `Live` share one base
 /// (the pill); `Live` grows into the panel that shows live transcription text.
 /// `None` hides the overlay entirely. Decoupled from whether the model runs in
@@ -396,6 +410,10 @@ pub struct AppSettings {
     /// from source-language selection and from ordinary transcription.
     #[serde(default)]
     pub translation_enabled: bool,
+    /// Selects direct speech translation or the context-aware ASR → text
+    /// translation cascade.
+    #[serde(default)]
+    pub translation_mode: TranslationMode,
     #[serde(default = "default_translation_target_language")]
     pub translation_target_language: String,
     #[serde(default = "default_selected_language")]
@@ -905,6 +923,7 @@ pub fn get_default_settings() -> AppSettings {
         selected_output_device: None,
         translate_to_english: false,
         translation_enabled: false,
+        translation_mode: TranslationMode::default(),
         translation_target_language: default_translation_target_language(),
         selected_language: "auto".to_string(),
         overlay_position: default_overlay_position(),
@@ -1127,6 +1146,14 @@ fn apply_settings_migrations(
         updated = true;
     }
 
+    // Existing stores predate the balanced cascade. Keep their direct speech
+    // translation behavior until the user explicitly chooses a new profile;
+    // fresh installs use the balanced default from `get_default_settings()`.
+    if settings_value.get("translation_mode").is_none() {
+        settings.translation_mode = TranslationMode::Direct;
+        updated = true;
+    }
+
     // One-time overlay migration (only while the new key is absent): the retired
     // overlay_position `none` meant "hide the overlay" → OverlayStyle::None; any
     // other position had it visible → Live. The position enum no longer has a
@@ -1196,6 +1223,7 @@ mod tests {
             .expect("all AppSettings fields need serde defaults");
         assert!(settings.push_to_talk);
         assert!(!settings.audio_feedback);
+        assert_eq!(settings.translation_mode, TranslationMode::Balanced);
         // Bindings default to empty; the load path merges the real defaults in.
         assert!(settings.bindings.is_empty());
     }
@@ -1322,6 +1350,19 @@ mod tests {
             CURRENT_SETTINGS_SCHEMA_VERSION
         );
         assert!(!settings.translation_enabled);
+        assert_eq!(settings.translation_mode, TranslationMode::Direct);
+    }
+
+    #[test]
+    fn pre_schema_store_keeps_direct_translation_until_user_changes_profile() {
+        let stored = serde_json::json!({
+            "selected_model": "whisper-large-v3-turbo",
+            "translation_enabled": true
+        });
+        let mut settings: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(settings.translation_mode, TranslationMode::Direct);
     }
 
     #[test]
@@ -1423,6 +1464,7 @@ mod tests {
     fn default_settings_disable_auto_submit() {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
+        assert_eq!(settings.translation_mode, TranslationMode::Balanced);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
         assert_eq!(
             settings.settings_schema_version,
@@ -1515,6 +1557,7 @@ mod tests {
             "onboarding_completed": false,
             "whats_new_last_seen_version": default_whats_new_last_seen_version(),
             "overlay_style": "live",
+            "translation_mode": "balanced",
             "transcribe_accelerator": "gpu",
             "transcribe_gpu_device": 2
         });

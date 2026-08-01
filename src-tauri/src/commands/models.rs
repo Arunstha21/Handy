@@ -1,6 +1,6 @@
 use crate::managers::model::{ModelInfo, ModelManager};
 use crate::managers::transcription::{ModelStateEvent, TranscriptionManager};
-use crate::settings::{get_settings, write_settings, ModelUnloadTimeout};
+use crate::settings::{get_settings, write_settings, ModelUnloadTimeout, TranslationMode};
 use log::error;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -122,6 +122,12 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
     let mut settings = settings;
     settings.selected_model = model_id.to_string();
     settings.onboarding_completed = true;
+    // Direct speech translation is only valid for models that advertise native
+    // translation. A model switch to a regular ASR model should leave the
+    // dedicated translation shortcut usable through the balanced cascade.
+    if settings.translation_mode == TranslationMode::Direct && !model_info.supports_translation {
+        settings.translation_mode = TranslationMode::Balanced;
+    }
 
     write_settings(app, settings);
 

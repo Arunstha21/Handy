@@ -12,8 +12,8 @@ interface TranscriptionContextProps {
 }
 
 /**
- * Provides stable domain vocabulary to Whisper-family decoders without adding
- * another model or sending the context to a remote service.
+ * Provides stable domain vocabulary to local speech decoders. Balanced
+ * translation also includes this context in the configured text-model request.
  */
 export const TranscriptionContext: React.FC<TranscriptionContextProps> = ({
   descriptionMode = "tooltip",

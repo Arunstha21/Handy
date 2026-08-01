@@ -115,6 +115,8 @@ const settingUpdaters: {
     commands.changeTranslateToEnglishSetting(value as boolean),
   translation_enabled: (value) =>
     commands.changeTranslationEnabledSetting(value as boolean),
+  translation_mode: (value) =>
+    commands.changeTranslationModeSetting(value as "direct" | "balanced"),
   translation_target_language: (value) =>
     commands.changeTranslationTargetLanguageSetting(value as string),
   dual_model_enabled: (value) =>

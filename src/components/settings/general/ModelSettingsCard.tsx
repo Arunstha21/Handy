@@ -30,6 +30,9 @@ export const ModelSettingsCard: React.FC = () => {
   const showLanguageSelector =
     supportsLanguageSelection || supportsChineseOnlyScriptSelection;
   const supportsTranslation = currentModelInfo?.supports_translation ?? false;
+  // Any local ASR model can feed the text-model half of the balanced
+  // translation cascade, even when it cannot translate speech directly.
+  const supportsBalancedTranslation = Boolean(currentModelInfo);
   const translationTargetLanguages =
     currentModelInfo?.engine_type === "TranscribeCpp"
       ? ["en"]
@@ -38,7 +41,10 @@ export const ModelSettingsCard: React.FC = () => {
         : [];
   const experimentalEnabled = getSetting("experimental_enabled") || false;
   const hasAnySettings =
-    showLanguageSelector || supportsTranslation || experimentalEnabled;
+    showLanguageSelector ||
+    supportsTranslation ||
+    supportsBalancedTranslation ||
+    experimentalEnabled;
 
   // Don't render anything if no model is selected or no settings available
   if (!currentModel || !currentModelInfo || !hasAnySettings) {
@@ -61,12 +67,13 @@ export const ModelSettingsCard: React.FC = () => {
           }
         />
       )}
-      {supportsTranslation && (
+      {supportsBalancedTranslation && (
         <TranslateToEnglish
           descriptionMode="tooltip"
           grouped={true}
           supportedLanguages={currentModelInfo.supported_languages}
           translationTargetLanguages={translationTargetLanguages}
+          supportsDirectTranslation={supportsTranslation}
         />
       )}
       {experimentalEnabled && (

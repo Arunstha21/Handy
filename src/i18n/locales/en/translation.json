@@ -347,6 +347,12 @@
       "translation": {
         "label": "Enable translation mode",
         "description": "Enable a separate shortcut that translates speech into a selected language.",
+        "modeLabel": "Translation profile",
+        "modeDescription": "Balanced transcribes locally first, then uses the configured text model with your context and glossary. Configure it under Advanced → Post-processing; use a local OpenAI-compatible server to keep the second step local. Direct uses a speech model's built-in translation.",
+        "modes": {
+          "balanced": "Balanced (context-aware)",
+          "direct": "Direct speech translation"
+        },
         "targetLabel": "Translation target",
         "targetDescription": "Choose the language produced by the translation shortcut."
       },
@@ -381,7 +387,7 @@
       },
       "transcriptionContext": {
         "title": "Transcription context",
-        "description": "Give Whisper-family models names, jargon, or a topic to improve recognition. This is a local decoding hint, not an instruction, and is limited to 2,000 characters.",
+        "description": "Give speech models names, jargon, or a topic to improve recognition. Balanced translation also sends this context to the configured text model. It is a hint, not an instruction, and is limited to 2,000 characters.",
         "placeholder": "Example: Q3 planning for Handy, Graphify, and the Tauri migration"
       },
       "voiceActivityDetection": {
