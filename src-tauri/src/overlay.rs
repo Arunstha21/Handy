@@ -55,12 +55,23 @@ const OVERLAY_HEIGHT: f64 = 46.0;
 const OVERLAY_STREAM_WIDTH: f64 = 400.0;
 const OVERLAY_STREAM_HEIGHT: f64 = 120.0;
 
+// On a notched MacBook the overlay becomes an attached Dynamic Island-style
+// control. These larger sizes leave room for the black housing shape and for
+// the live transcript to expand down from the display's top edge.
+const OVERLAY_NOTCH_WIDTH: f64 = 336.0;
+const OVERLAY_NOTCH_HEIGHT: f64 = 52.0;
+const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 508.0;
+const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 132.0;
+
 /// Overlay window size (logical) for a given UI state.
-fn overlay_dimensions(state: &str) -> (f64, f64) {
-    if state == "streaming" {
-        (OVERLAY_STREAM_WIDTH, OVERLAY_STREAM_HEIGHT)
-    } else {
-        (OVERLAY_WIDTH, OVERLAY_HEIGHT)
+fn overlay_dimensions(app_handle: &AppHandle, state: &str) -> (f64, f64) {
+    let is_notch = settings::get_settings(app_handle).overlay_position == OverlayPosition::Notch;
+
+    match (is_notch, state == "streaming") {
+        (true, true) => (OVERLAY_NOTCH_STREAM_WIDTH, OVERLAY_NOTCH_STREAM_HEIGHT),
+        (true, false) => (OVERLAY_NOTCH_WIDTH, OVERLAY_NOTCH_HEIGHT),
+        (false, true) => (OVERLAY_STREAM_WIDTH, OVERLAY_STREAM_HEIGHT),
+        (false, false) => (OVERLAY_WIDTH, OVERLAY_HEIGHT),
     }
 }
 
@@ -237,10 +248,11 @@ fn is_mouse_within_monitor(
 /// Returns the top safe-area inset for the monitor containing the cursor.
 ///
 /// NSScreen exposes the camera-housing exclusion as a safe-area inset. The
-/// Tauri monitor already gives us the matching logical origin, so only the
-/// inset is needed to place the card immediately below the housing. Matching
-/// by backing-scaled frame size keeps this correct when several displays are
-/// attached and the cursor moves between them.
+/// Tauri monitor already gives us the matching logical origin. The safe-area
+/// inset tells us whether this is a notched display, so the attached card can
+/// begin at the display's top edge. Matching by backing-scaled frame size keeps
+/// this correct when several displays are attached and the cursor moves between
+/// them.
 #[cfg(target_os = "macos")]
 fn macos_notch_inset(monitor: &tauri::Monitor) -> Option<f64> {
     let marker = ObjcMainThreadMarker::new()?;
@@ -305,7 +317,10 @@ fn calculate_overlay_position(
             #[cfg(target_os = "macos")]
             {
                 macos_notch_inset(&monitor)
-                    .map(|inset| monitor_y + inset)
+                    // Start at the physical display edge, not below the safe
+                    // area: the black card is the visual continuation of the
+                    // camera housing, like a Dynamic Island.
+                    .map(|_| monitor_y)
                     .unwrap_or(monitor_y + OVERLAY_TOP_OFFSET)
             }
             #[cfg(not(target_os = "macos"))]
@@ -423,11 +438,13 @@ fn place_windows_overlay(
 /// Creates the recording overlay window and keeps it hidden by default
 #[cfg(not(target_os = "macos"))]
 pub fn create_recording_overlay(app_handle: &AppHandle) {
+    let (width, height) = overlay_dimensions(app_handle, "recording");
+
     // On Linux (Wayland), monitor detection often fails, but we don't need exact coordinates
     // for Layer Shell as we use anchors. On other platforms, we require a monitor.
     #[cfg(not(target_os = "linux"))]
     {
-        let position = calculate_overlay_position(app_handle, OVERLAY_WIDTH, OVERLAY_HEIGHT);
+        let position = calculate_overlay_position(app_handle, width, height);
         if position.is_none() {
             debug!("Failed to determine overlay position, not creating overlay window");
             return;
@@ -443,7 +460,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     )
     .title("Recording")
     .resizable(false)
-    .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+    .inner_size(width, height)
     .shadow(false)
     .maximizable(false)
     .minimizable(false)
@@ -485,7 +502,8 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
 /// Creates the recording overlay panel and keeps it hidden by default (macOS)
 #[cfg(target_os = "macos")]
 pub fn create_recording_overlay(app_handle: &AppHandle) {
-    if let Some((x, y)) = calculate_overlay_position(app_handle, OVERLAY_WIDTH, OVERLAY_HEIGHT) {
+    let (width, height) = overlay_dimensions(app_handle, "recording");
+    if let Some((x, y)) = calculate_overlay_position(app_handle, width, height) {
         // PanelBuilder creates a Tauri window then converts it to NSPanel.
         // The window remains registered, so get_webview_window() still works.
         match PanelBuilder::<_, RecordingOverlayPanel>::new(app_handle, "recording_overlay")
@@ -493,10 +511,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
             .title("Recording")
             .position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
             .level(PanelLevel::Status)
-            .size(tauri::Size::Logical(tauri::LogicalSize {
-                width: OVERLAY_WIDTH,
-                height: OVERLAY_HEIGHT,
-            }))
+            .size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
             .has_shadow(false)
             .transparent(true)
             .no_activate(true)
@@ -544,7 +559,7 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
 
 fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
     // Size the overlay for this state (compact vs. streaming), then position it.
-    let (width, height) = overlay_dimensions(state);
+    let (width, height) = overlay_dimensions(app_handle, state);
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
         #[cfg(target_os = "linux")]
         update_gtk_layer_shell_anchors(&overlay_window);
@@ -646,7 +661,7 @@ fn update_overlay_position_on_main(app_handle: &AppHandle) {
             } else {
                 "recording"
             };
-            let (width, height) = overlay_dimensions(state);
+            let (width, height) = overlay_dimensions(app_handle, state);
             if let Err(error) = place_windows_overlay(app_handle, &overlay_window, width, height) {
                 log::error!("Failed to update recording overlay position: {error}");
             }
@@ -657,7 +672,7 @@ fn update_overlay_position_on_main(app_handle: &AppHandle) {
             // Use the window's current size so centering stays correct whether the
             // overlay is in compact or streaming layout.
             let (width, height) = current_overlay_logical_size(&overlay_window)
-                .unwrap_or((OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                .unwrap_or_else(|| overlay_dimensions(app_handle, "recording"));
             if let Some((x, y)) = calculate_overlay_position(app_handle, width, height) {
                 let _ = overlay_window
                     .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));

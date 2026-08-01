@@ -172,6 +172,10 @@
             "name": "Transcribe Shortcut",
             "description": "The keyboard shortcut to record and transcribe your voice."
           },
+          "transcribe_with_translation": {
+            "name": "Translate Speech Shortcut",
+            "description": "The keyboard shortcut to record your speech and translate it into the selected target language."
+          },
           "cancel": {
             "name": "Cancel Shortcut",
             "description": "The keyboard shortcut to cancel the current recording."
@@ -198,6 +202,9 @@
         "label": "Push To Talk",
         "description": "Hold to record, release to stop"
       }
+    },
+    "translation": {
+      "title": "Translation"
     },
     "models": {
       "title": "Transcription Models",
@@ -293,11 +300,11 @@
         },
         "position": {
           "title": "Overlay Position",
-          "description": "Where the overlay appears on screen during recording and transcription.",
+          "description": "Where the overlay appears during recording and transcription. On a notched MacBook, Notch attaches a Dynamic Island-style control to the camera housing; elsewhere it uses the top edge.",
           "options": {
             "bottom": "Bottom",
             "top": "Top",
-            "notch": "Notch"
+            "notch": "Notch (Dynamic Island)"
           }
         }
       },

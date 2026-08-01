@@ -33,6 +33,14 @@
   --ov-open-w: 392px; /* Live panel, expanded */
   --ov-base-h: 40px; /* control-row height (.sbase) */
   --ov-cap-max-h: 64px; /* max height of the scrolling live-text region */
+
+  /* Dynamic Island-style notch geometry. The native notched window in
+     overlay.rs is intentionally a little wider/taller than this footprint. */
+  --ov-notch-rest-w: 284px;
+  --ov-notch-pill-w: 296px;
+  --ov-notch-work-w: 330px;
+  --ov-notch-open-w: 484px;
+  --ov-notch-base-h: 48px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -72,7 +80,7 @@
   align-items: flex-start; /* top placement: flush to the top edge */
 }
 .ov-stage.notch {
-  align-items: flex-start; /* notch placement is anchored below the housing */
+  align-items: flex-start; /* notch placement begins at the display edge */
 }
 
 /* Compact pill: fade the whole container in/out (the pill itself never pops or
@@ -96,12 +104,10 @@
   transform-origin: top center;
 }
 .ov-stage.notch .scard {
-  /* The native window begins at the bottom edge of the camera housing. Keep
-     the same downward growth and visual attachment as a Top overlay. */
+  /* The native window begins at the display edge. Keep the same downward
+     growth as a Top overlay while visually merging with the camera housing. */
   flex-direction: column-reverse;
   transform-origin: top center;
-  border-top-left-radius: 10px;
-  border-top-right-radius: 10px;
 }
 .ov-stage.top .stext-cap {
   /* Mirror of the bottom overlay (top: 12 / bottom: 0): the first line sits flush
@@ -193,6 +199,60 @@
 }
 .scard.compact.cworking {
   width: var(--ov-work-w);
+}
+
+/* Notch / Dynamic Island treatment. It is deliberately pure black and flush
+   at the top: a bordered floating pill would read as a separate window instead
+   of a continuation of the MacBook camera housing. */
+.ov-stage.notch .scard {
+  width: var(--ov-notch-pill-w);
+  background: #050505;
+  border: 0;
+  border-radius: 0 0 24px 24px;
+  transition:
+    width 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ov-stage.notch .scard.open {
+  width: var(--ov-notch-open-w);
+  border-radius: 0 0 26px 26px;
+}
+.ov-stage.notch .scard.working,
+.ov-stage.notch .scard.compact.cworking {
+  width: var(--ov-notch-work-w);
+  border-radius: 0 0 22px 22px;
+}
+.ov-stage.notch .scard.compact {
+  width: var(--ov-notch-rest-w);
+}
+.ov-stage.notch .sbase {
+  height: var(--ov-notch-base-h);
+  padding: 0 14px;
+}
+.ov-stage.notch .sdot {
+  background: #ff5368;
+}
+.ov-stage.notch .swave i {
+  background: #d8dcff;
+}
+.ov-stage.notch .stext-cap,
+.ov-stage.notch .swork-label {
+  color: #f5f5f7;
+}
+.ov-stage.notch .stimer {
+  color: #aaaab5;
+}
+.ov-stage.notch .sx {
+  color: #f5f5f7;
+  background: rgb(255 255 255 / 14%);
+}
+.ov-stage.notch .sx:hover {
+  background: rgb(255 255 255 / 24%);
+  color: #fff;
+}
+.ov-stage.notch .sspinner {
+  border-color: rgb(255 255 255 / 22%);
+  border-top-color: #d8dcff;
 }
 
 /* text region — auto-height open via grid-rows trick; region fades as a whole */
@@ -362,6 +422,10 @@
 .sx:active {
   transform: scale(0.95);
 }
+.sx:focus-visible {
+  outline: 2px solid var(--s-accent);
+  outline-offset: 2px;
+}
 
 /* working state (transcribing / polishing) — spinner + label */
 .sspinner {
@@ -387,4 +451,16 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-fade,
+  .scard,
+  .stext,
+  .stimer,
+  .swave i,
+  .sx {
+    animation: none;
+    transition-duration: 1ms;
+  }
 }
