@@ -1431,13 +1431,19 @@ impl TranscriptionManager {
                         // whisper run extension to a non-whisper arch is rejected
                         // with INVALID_ARG, so skip it there and let the fuzzy
                         // post-correction handle custom words instead.
-                        let family = if settings.custom_words.is_empty() || !model_is_whisper {
+                        let family = if !model_is_whisper || !model_takes_initial_prompt {
                             None
                         } else {
-                            Some(RunExtension::Whisper(WhisperRunOptions {
-                                initial_prompt: Some(settings.custom_words.join(", ")),
-                                ..Default::default()
-                            }))
+                            whisper_initial_prompt(
+                                &settings.custom_words,
+                                &settings.transcription_context,
+                            )
+                            .map(|initial_prompt| {
+                                RunExtension::Whisper(WhisperRunOptions {
+                                    initial_prompt: Some(initial_prompt),
+                                    ..Default::default()
+                                })
+                            })
                         };
 
                         let run_plan = transcribe_cpp_run_plan(
@@ -1751,6 +1757,21 @@ fn normalize_cjk_language(language: &str) -> &str {
         "zh-Hans" | "zh-Hant" => "zh",
         other => other,
     }
+}
+
+/// Compose the bounded decoding hint shared by all local Whisper-family runs.
+/// Custom words remain useful as a compact vocabulary list, while the free-form
+/// context lets users provide names, jargon, or a meeting/project topic.
+fn whisper_initial_prompt(custom_words: &[String], context: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let context = context.trim();
+    if !context.is_empty() {
+        parts.push(context.to_string());
+    }
+    if !custom_words.is_empty() {
+        parts.push(custom_words.join(", "));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 /// Resolve the persisted language intent into the language a specific model can
@@ -2221,6 +2242,28 @@ mod tests {
             resolved.method,
             ResolutionMethod::SecondaryFallback
         ));
+    }
+
+    #[test]
+    fn whisper_initial_prompt_combines_context_and_custom_words() {
+        let prompt = whisper_initial_prompt(
+            &["Graphify".to_string(), "Tauri".to_string()],
+            "A Handy architecture review",
+        );
+
+        assert_eq!(
+            prompt.as_deref(),
+            Some("A Handy architecture review\nGraphify, Tauri")
+        );
+    }
+
+    #[test]
+    fn whisper_initial_prompt_omits_empty_hints() {
+        assert_eq!(whisper_initial_prompt(&[], "  "), None);
+        assert_eq!(
+            whisper_initial_prompt(&["Handy".to_string()], "  ").as_deref(),
+            Some("Handy")
+        );
     }
 
     fn languages(codes: &[&str]) -> Vec<String> {

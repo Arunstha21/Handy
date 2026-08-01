@@ -31,7 +31,8 @@ export const ModelSettingsCard: React.FC = () => {
     supportsLanguageSelection || supportsChineseOnlyScriptSelection;
   const supportsTranslation = currentModelInfo?.supports_translation ?? false;
   const experimentalEnabled = getSetting("experimental_enabled") || false;
-  const hasAnySettings = showLanguageSelector || supportsTranslation;
+  const hasAnySettings =
+    showLanguageSelector || supportsTranslation || experimentalEnabled;
 
   // Don't render anything if no model is selected or no settings available
   if (!currentModel || !currentModelInfo || !hasAnySettings) {

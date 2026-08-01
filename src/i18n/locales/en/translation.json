@@ -379,6 +379,11 @@
         "remove": "Remove {{word}}",
         "duplicate": "\"{{word}}\" already exists"
       },
+      "transcriptionContext": {
+        "title": "Transcription context",
+        "description": "Give Whisper-family models names, jargon, or a topic to improve recognition. This is a local decoding hint, not an instruction, and is limited to 2,000 characters.",
+        "placeholder": "Example: Q3 planning for Handy, Graphify, and the Tauri migration"
+      },
       "voiceActivityDetection": {
         "title": "Voice Activity Detection",
         "description": "Filter silence from recordings. Streaming-capable models use a longer VAD tail; disabling VAD records raw audio."

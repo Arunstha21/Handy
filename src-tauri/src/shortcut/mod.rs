@@ -868,6 +868,23 @@ pub fn update_custom_words(app: AppHandle, words: Vec<String>) -> Result<(), Str
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_transcription_context_setting(app: AppHandle, context: String) -> Result<(), String> {
+    const MAX_CONTEXT_CHARS: usize = 2_000;
+    let context = context.trim().to_string();
+    if context.chars().count() > MAX_CONTEXT_CHARS {
+        return Err(format!(
+            "Transcription context cannot exceed {MAX_CONTEXT_CHARS} characters"
+        ));
+    }
+
+    let mut settings = settings::get_settings(&app);
+    settings.transcription_context = context;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_word_correction_threshold_setting(
     app: AppHandle,
     threshold: f64,
