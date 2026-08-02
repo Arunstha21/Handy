@@ -241,9 +241,10 @@ jobs:
           echo "CERT_ID=$CERT_ID" >> $GITHUB_ENV
           echo "Certificate imported."
 
-      # Fork/PR builds deliberately run without release credentials. Remove
-      # platform signing hooks so tauri-bundler does not try to import a
-      # certificate or invoke the production Windows signing command.
+      # Fork/PR builds deliberately run without release credentials. Keep an
+      # ad-hoc macOS signature so Gatekeeper does not classify downloaded apps
+      # as damaged; production Developer ID signing/notarization still runs
+      # when release credentials are available.
       - name: Disable platform signing for unsigned builds
         if: ${{ !inputs.sign-binaries }}
         shell: bash
@@ -251,7 +252,7 @@ jobs:
           bun -e '
             const path = "src-tauri/tauri.conf.json";
             const config = JSON.parse(await Bun.file(path).text());
-            delete config.bundle.macOS.signingIdentity;
+            config.bundle.macOS.signingIdentity = "-";
             delete config.bundle.windows.signCommand;
             config.bundle.createUpdaterArtifacts = false;
             await Bun.write(path, JSON.stringify(config, null, 2) + "\n");
