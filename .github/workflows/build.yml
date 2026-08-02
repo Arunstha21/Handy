@@ -246,9 +246,11 @@ jobs:
           echo "Certificate imported."
 
       # Fork/PR builds deliberately run without release credentials. Keep an
-      # ad-hoc macOS signature so Gatekeeper does not classify downloaded apps
-      # as damaged; production Developer ID signing/notarization still runs
-      # when release credentials are available.
+      # ad-hoc macOS signature so the app bundle and its nested code remain
+      # internally sealed. This is not a Developer ID signature: Gatekeeper
+      # may still require a right-click/Open or quarantine removal on first
+      # launch. Production Developer ID signing/notarization runs when release
+      # credentials are available.
       - name: Disable platform signing for unsigned builds
         if: ${{ !inputs.sign-binaries }}
         shell: bash
