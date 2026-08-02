@@ -36,6 +36,16 @@ export const TranslateToEnglish: React.FC<TranslateToEnglishProps> = React.memo(
         ? translationMode
         : "balanced";
     const targetLanguage = getSetting("translation_target_language") || "en";
+    const translationProviderId =
+      getSetting("translation_provider_id") || "custom";
+    const translationProviderOptions = (
+      getSetting("post_process_providers") || []
+    )
+      .filter((provider) => provider.id !== "apple_intelligence")
+      .map((provider) => ({
+        value: provider.id,
+        label: provider.label,
+      }));
     const targetOptions = MODEL_CAPABILITY_LANGUAGES.filter((language) =>
       effectiveTranslationMode === "balanced"
         ? true
@@ -116,6 +126,28 @@ export const TranslateToEnglish: React.FC<TranslateToEnglishProps> = React.memo(
                 }
               />
             </SettingContainer>
+            {effectiveTranslationMode === "balanced" && (
+              <SettingContainer
+                title={t("settings.advanced.translation.providerLabel")}
+                description={t(
+                  "settings.advanced.translation.providerDescription",
+                )}
+                descriptionMode={descriptionMode}
+                grouped={grouped}
+              >
+                <Dropdown
+                  options={translationProviderOptions}
+                  selectedValue={translationProviderId}
+                  onSelect={(value) =>
+                    updateSetting("translation_provider_id", value)
+                  }
+                  disabled={
+                    translationProviderOptions.length === 0 ||
+                    isUpdating("translation_provider_id")
+                  }
+                />
+              </SettingContainer>
+            )}
           </>
         )}
       </>

@@ -1,4 +1,4 @@
-use crate::settings::PostProcessProvider;
+use crate::settings::{PostProcessProvider, GOOGLE_AI_STUDIO_PROVIDER_ID};
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,54 @@ struct ChatMessageResponse {
     content: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GeminiGenerateContentResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiContent {
+    #[serde(default)]
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiPart {
+    text: Option<String>,
+}
+
+fn is_google_ai_studio(provider: &PostProcessProvider) -> bool {
+    provider.id == GOOGLE_AI_STUDIO_PROVIDER_ID
+}
+
+/// Gemini's REST response schema uses the enum-style uppercase type names,
+/// while Handy's provider-neutral JSON schema is lowercase. Normalize only
+/// schema `type` values and preserve all other fields.
+fn normalize_gemini_schema(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::String(type_name)) = object.get_mut("type") {
+                *type_name = type_name.to_uppercase();
+            }
+            for child in object.values_mut() {
+                normalize_gemini_schema(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_gemini_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Build headers for API requests based on provider type
 fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
@@ -151,7 +199,13 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
 
     // Provider-specific auth headers
     if !api_key.is_empty() {
-        if provider.id == "anthropic" {
+        if is_google_ai_studio(provider) {
+            headers.insert(
+                "x-goog-api-key",
+                HeaderValue::from_str(api_key)
+                    .map_err(|e| format!("Invalid Google AI Studio API key: {}", e))?,
+            );
+        } else if provider.id == "anthropic" {
             headers.insert(
                 "x-api-key",
                 HeaderValue::from_str(api_key)
@@ -184,6 +238,83 @@ fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwes
         .connect_timeout(CHAT_CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+/// Send a request through Google's native Gemini API. Gemini is not an
+/// OpenAI-compatible endpoint: it uses `generateContent`, `contents`/`parts`,
+/// a `systemInstruction`, and the `x-goog-api-key` header.
+async fn send_google_ai_studio_completion(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+) -> Result<Option<String>, String> {
+    let base_url = provider.base_url.trim_end_matches('/');
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    let url = format!("{}/models/{}:generateContent", base_url, model);
+
+    debug!("Sending Gemini generateContent request to: {}", url);
+
+    let client = create_client(provider, &api_key)?;
+    let mut request_body = serde_json::json!({
+        "contents": [{
+            "role": "user",
+            "parts": [{ "text": user_content }]
+        }]
+    });
+
+    if let Some(system) = system_prompt {
+        request_body["systemInstruction"] = serde_json::json!({
+            "parts": [{ "text": system }]
+        });
+    }
+
+    if let Some(mut schema) = json_schema {
+        normalize_gemini_schema(&mut schema);
+        request_body["generationConfig"] = serde_json::json!({
+            "responseMimeType": "application/json",
+            "responseSchema": schema
+        });
+    }
+
+    let response = client
+        .post(&url)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini API request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Failed to read error response".to_string());
+        return Err(format!(
+            "Gemini API request failed with status {}: {}",
+            status, error_text
+        ));
+    }
+
+    let completion: GeminiGenerateContentResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Gemini API response: {}", e))?;
+
+    Ok(completion
+        .candidates
+        .first()
+        .and_then(|candidate| candidate.content.as_ref())
+        .map(|content| {
+            content
+                .parts
+                .iter()
+                .filter_map(|part| part.text.as_deref())
+                .collect::<String>()
+        })
+        .filter(|content| !content.is_empty()))
 }
 
 /// Send a chat completion request to an OpenAI-compatible API
@@ -227,6 +358,20 @@ pub async fn send_chat_completion_with_schema(
     json_schema: Option<Value>,
     disable_reasoning: bool,
 ) -> Result<Option<String>, String> {
+    if is_google_ai_studio(provider) {
+        // Gemini exposes its own thinking controls and does not accept the
+        // provider-neutral reasoning fields used by OpenAI-compatible APIs.
+        return send_google_ai_studio_completion(
+            provider,
+            api_key,
+            model,
+            user_content,
+            system_prompt,
+            json_schema,
+        )
+        .await;
+    }
+
     let base_url = provider.base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base_url);
 
@@ -338,14 +483,73 @@ pub async fn send_chat_completion_with_schema(
         .and_then(|choice| choice.message.content.clone()))
 }
 
-/// Fetch available models from an OpenAI-compatible API
-/// Returns a list of model IDs
+fn parse_model_ids(provider: &PostProcessProvider, parsed: &Value) -> Vec<String> {
+    let mut models = Vec::new();
+
+    if is_google_ai_studio(provider) {
+        // Gemini returns { models: [{ name, baseModelId,
+        // supportedGenerationMethods }] }. Only expose models that can serve
+        // generateContent; embeddings and media-only models are not valid for
+        // Handy's post-processing requests.
+        if let Some(entries) = parsed.get("models").and_then(|value| value.as_array()) {
+            for entry in entries {
+                let supports_generation = entry
+                    .get("supportedGenerationMethods")
+                    .and_then(|methods| methods.as_array())
+                    .map(|methods| {
+                        methods
+                            .iter()
+                            .any(|method| method.as_str() == Some("generateContent"))
+                    })
+                    .unwrap_or(true);
+                if !supports_generation {
+                    continue;
+                }
+
+                let model = entry
+                    .get("baseModelId")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| entry.get("name").and_then(|value| value.as_str()))
+                    .map(|model| model.trim_start_matches("models/").to_string());
+                if let Some(model) = model.filter(|model| !model.is_empty()) {
+                    models.push(model);
+                }
+            }
+        }
+        return models;
+    }
+
+    // Handle OpenAI format: { data: [ { id: "..." }, ... ] }
+    if let Some(data) = parsed.get("data").and_then(|d| d.as_array()) {
+        for entry in data {
+            if let Some(id) = entry.get("id").and_then(|i| i.as_str()) {
+                models.push(id.to_string());
+            } else if let Some(name) = entry.get("name").and_then(|n| n.as_str()) {
+                models.push(name.to_string());
+            }
+        }
+    }
+    // Handle array format: [ "model1", "model2", ... ]
+    else if let Some(array) = parsed.as_array() {
+        for entry in array {
+            if let Some(model) = entry.as_str() {
+                models.push(model.to_string());
+            }
+        }
+    }
+
+    models
+}
+
+/// Fetch available models from a provider's model-list endpoint.
+/// Returns a list of model IDs.
 pub async fn fetch_models(
     provider: &PostProcessProvider,
     api_key: String,
 ) -> Result<Vec<String>, String> {
     let base_url = provider.base_url.trim_end_matches('/');
-    let url = format!("{}/models", base_url);
+    let models_endpoint = provider.models_endpoint.as_deref().unwrap_or("/models");
+    let url = format!("{}{}", base_url, models_endpoint);
 
     debug!("Fetching models from: {}", url);
 
@@ -374,28 +578,7 @@ pub async fn fetch_models(
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-    let mut models = Vec::new();
-
-    // Handle OpenAI format: { data: [ { id: "..." }, ... ] }
-    if let Some(data) = parsed.get("data").and_then(|d| d.as_array()) {
-        for entry in data {
-            if let Some(id) = entry.get("id").and_then(|i| i.as_str()) {
-                models.push(id.to_string());
-            } else if let Some(name) = entry.get("name").and_then(|n| n.as_str()) {
-                models.push(name.to_string());
-            }
-        }
-    }
-    // Handle array format: [ "model1", "model2", ... ]
-    else if let Some(array) = parsed.as_array() {
-        for entry in array {
-            if let Some(model) = entry.as_str() {
-                models.push(model.to_string());
-            }
-        }
-    }
-
-    Ok(models)
+    Ok(parse_model_ids(provider, &parsed))
 }
 
 #[cfg(test)]
@@ -461,6 +644,56 @@ mod tests {
         assert!(json.get("reasoning_effort").is_none());
         assert!(json.get("reasoning").is_none());
         assert_eq!(json["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn google_ai_studio_uses_native_api_key_header() {
+        let google = provider(
+            GOOGLE_AI_STUDIO_PROVIDER_ID,
+            "https://generativelanguage.googleapis.com/v1beta",
+        );
+        let headers = build_headers(&google, "AIza-test-key").unwrap();
+
+        assert_eq!(headers.get("x-goog-api-key").unwrap(), "AIza-test-key");
+        assert!(headers.get(AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn gemini_schema_uses_uppercase_type_names() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "transcription": { "type": "string" }
+            }
+        });
+
+        normalize_gemini_schema(&mut schema);
+
+        assert_eq!(schema["type"], "OBJECT");
+        assert_eq!(schema["properties"]["transcription"]["type"], "STRING");
+    }
+
+    #[test]
+    fn google_model_list_uses_generate_content_models_only() {
+        let google = provider(GOOGLE_AI_STUDIO_PROVIDER_ID, "https://example.com/v1beta");
+        let parsed = serde_json::json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-flash-lite",
+                    "baseModelId": "gemini-2.5-flash-lite",
+                    "supportedGenerationMethods": ["generateContent"]
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "supportedGenerationMethods": ["embedContent"]
+                }
+            ]
+        });
+
+        assert_eq!(
+            parse_model_ids(&google, &parsed),
+            vec!["gemini-2.5-flash-lite"]
+        );
     }
 
     #[test]

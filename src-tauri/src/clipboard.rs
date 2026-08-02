@@ -3,7 +3,7 @@ use crate::input::{self, EnigoState};
 use crate::settings::TypingTool;
 use crate::settings::{get_settings, AutoSubmitKey, ClipboardHandling, PasteMethod};
 use enigo::{Direction, Enigo, Key, Keyboard};
-use log::info;
+use log::{debug, info, warn};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
@@ -18,6 +18,11 @@ use crate::utils::{is_kde_wayland, is_wayland};
 const SELECTION_COPY_TIMEOUT: Duration = Duration::from_secs(1);
 const SELECTION_COPY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SELECTION_COPY_SETTLE_DELAY: Duration = Duration::from_millis(60);
+// Windows clipboard ownership can be held briefly by the source application,
+// clipboard history, or a browser's delayed-rendering callback. Retry writes
+// and reads instead of treating that normal hand-off as a failed selection.
+const CLIPBOARD_RETRY_TIMEOUT: Duration = Duration::from_millis(350);
+const CLIPBOARD_RETRY_INTERVAL: Duration = Duration::from_millis(15);
 const MAX_SELECTION_TRANSLATION_CHARS: usize = 12_000;
 
 /// Re-registers global shortcuts on every return path after the synthetic copy
@@ -52,6 +57,25 @@ fn selection_text_from_clipboard(
     Ok(Some(candidate.to_string()))
 }
 
+fn write_text_with_retry(
+    clipboard: &tauri_plugin_clipboard_manager::Clipboard<tauri::Wry>,
+    text: &str,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + CLIPBOARD_RETRY_TIMEOUT;
+
+    loop {
+        match clipboard.write_text(text) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(error.to_string());
+                }
+                std::thread::sleep(CLIPBOARD_RETRY_INTERVAL);
+            }
+        }
+    }
+}
+
 /// Copies the active application's selection and restores the previous clipboard
 /// contents before returning. A temporary sentinel prevents a failed copy from
 /// accidentally translating stale clipboard text.
@@ -76,7 +100,7 @@ pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
         .as_nanos();
     let sentinel = format!("__handy_selection_copy_{nonce}__");
 
-    clipboard.write_text(&sentinel).map_err(|error| {
+    write_text_with_retry(clipboard, &sentinel).map_err(|error| {
         format!("Failed to prepare clipboard for selected-text translation: {error}")
     })?;
 
@@ -93,6 +117,7 @@ pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
 
     let mut selected = None;
     let mut selection_error = None;
+    let mut last_clipboard_error = None;
     if copy_result.is_ok() {
         let deadline = std::time::Instant::now() + SELECTION_COPY_TIMEOUT;
         while std::time::Instant::now() < deadline {
@@ -109,8 +134,11 @@ pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
                     }
                 },
                 Err(error) => {
-                    selection_error = Some(format!("Failed to read selected text: {error}"));
-                    break;
+                    // A temporary ClipboardOccupied/ContentNotAvailable error
+                    // is expected on Windows while the source app publishes
+                    // delayed clipboard data. Keep polling until the same
+                    // deadline used for asynchronous browser editors.
+                    last_clipboard_error = Some(error.to_string());
                 }
             }
             std::thread::sleep(SELECTION_COPY_POLL_INTERVAL);
@@ -118,7 +146,9 @@ pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
     }
 
     if let Some(text) = saved_text {
-        let _ = clipboard.write_text(&text);
+        if let Err(error) = write_text_with_retry(clipboard, &text) {
+            warn!("Failed to restore previous clipboard text after selected-text capture: {error}");
+        }
     } else if let Some(image) = saved_image {
         let _ = clipboard.write_image(&image);
     } else {
@@ -126,10 +156,28 @@ pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
     }
 
     copy_result?;
+    if let Some(text) = &selected {
+        debug!(
+            "Captured {} characters from the active selection",
+            text.chars().count()
+        );
+    } else if let Some(error) = &last_clipboard_error {
+        debug!("Selected-text clipboard polling ended after transient error: {error}");
+    }
     selection_error.map(Err).unwrap_or_else(|| {
-        selected.ok_or_else(|| {
-            "No text was copied. Select text in another app, then try the shortcut again."
-                .to_string()
+        selected.ok_or_else(|| match last_clipboard_error {
+            Some(error) => {
+                let clipboard_name = if cfg!(target_os = "windows") {
+                    "Windows clipboard"
+                } else {
+                    "system clipboard"
+                };
+                format!(
+                    "Could not read the selected text from the {clipboard_name}: {error}. Select text in another app, then try again."
+                )
+            }
+            None => "No text was copied. Select text in another app, then try the shortcut again."
+                .to_string(),
         })
     })
 }

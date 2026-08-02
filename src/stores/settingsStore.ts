@@ -119,6 +119,8 @@ const settingUpdaters: {
     commands.changeTranslationModeSetting(value as "direct" | "balanced"),
   translation_target_language: (value) =>
     commands.changeTranslationTargetLanguageSetting(value as string),
+  translation_provider_id: (value) =>
+    commands.changeTranslationProviderSetting(value as string),
   selected_text_translation_target_language: (value) =>
     commands.changeSelectedTextTranslationTargetLanguageSetting(
       value as string,

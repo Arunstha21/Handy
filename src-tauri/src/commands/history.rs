@@ -106,8 +106,13 @@ pub async fn retry_history_entry_transcription(
     }
 
     let transcription = if balanced_translation {
-        translate_with_balanced_profile(&translation_settings, &transcription, &translation_target)
-            .await?
+        translate_with_balanced_profile(
+            &app,
+            &translation_settings,
+            &transcription,
+            &translation_target,
+        )
+        .await?
     } else {
         transcription
     };

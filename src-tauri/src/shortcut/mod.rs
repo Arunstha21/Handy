@@ -737,6 +737,29 @@ pub fn change_translation_target_language_setting(
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_translation_provider_setting(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<(), String> {
+    let provider_id = provider_id.trim().to_string();
+    let mut settings = settings::get_settings(&app);
+    let provider = settings
+        .post_process_provider(&provider_id)
+        .ok_or_else(|| format!("Provider '{}' not found", provider_id))?;
+
+    if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        return Err(
+            "Apple Intelligence is not supported by the Balanced translation cascade".to_string(),
+        );
+    }
+
+    settings.translation_provider_id = provider_id;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_selected_text_translation_target_language_setting(
     app: AppHandle,
     language: String,

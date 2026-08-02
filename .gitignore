@@ -45,3 +45,4 @@ result
 
 # Python bytecode (scripts/)
 __pycache__/
+graphify-out

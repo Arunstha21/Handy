@@ -9,6 +9,9 @@ use tauri_plugin_store::StoreExt;
 
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
 pub const APPLE_INTELLIGENCE_DEFAULT_MODEL_ID: &str = "Apple Intelligence";
+pub const GOOGLE_AI_STUDIO_PROVIDER_ID: &str = "google_ai_studio";
+pub const GOOGLE_AI_STUDIO_DEFAULT_MODEL_ID: &str = "gemini-2.5-flash-lite";
+pub const LOCAL_TEXT_PROVIDER_ID: &str = "handy_local";
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
@@ -416,6 +419,11 @@ pub struct AppSettings {
     pub translation_mode: TranslationMode,
     #[serde(default = "default_translation_target_language")]
     pub translation_target_language: String,
+    /// Provider used by the Balanced speech-translation cascade. This is
+    /// intentionally independent from the post-processing provider so a local
+    /// translation model can be used alongside a hosted cleanup model.
+    #[serde(default = "default_translation_provider_id")]
+    pub translation_provider_id: String,
     /// Dedicated output language for selected-text translation. Keeping this
     /// separate prevents changing the speech-translation shortcut's target.
     #[serde(default = "default_selected_text_translation_target_language")]
@@ -516,7 +524,7 @@ fn default_model() -> String {
     "".to_string()
 }
 
-const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 4;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -536,6 +544,10 @@ fn default_translate_to_english() -> bool {
 
 fn default_translation_target_language() -> String {
     "en".to_string()
+}
+
+fn default_translation_provider_id() -> String {
+    "custom".to_string()
 }
 
 fn default_selected_text_translation_target_language() -> String {
@@ -697,6 +709,22 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
             models_endpoint: Some("/models".to_string()),
             supports_structured_output: true,
         },
+        PostProcessProvider {
+            id: GOOGLE_AI_STUDIO_PROVIDER_ID.to_string(),
+            label: "Google AI Studio (Gemini)".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            allow_base_url_edit: false,
+            models_endpoint: Some("/models".to_string()),
+            supports_structured_output: true,
+        },
+        PostProcessProvider {
+            id: LOCAL_TEXT_PROVIDER_ID.to_string(),
+            label: "Handy Local Runtime".to_string(),
+            base_url: "handy://local".to_string(),
+            allow_base_url_edit: false,
+            models_endpoint: None,
+            supports_structured_output: false,
+        },
     ];
 
     // Note: We always include Apple Intelligence on macOS ARM64 without checking availability
@@ -749,6 +777,9 @@ fn default_post_process_api_keys() -> SecretMap {
 fn default_model_for_provider(provider_id: &str) -> String {
     if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID {
         return APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string();
+    }
+    if provider_id == GOOGLE_AI_STUDIO_PROVIDER_ID {
+        return GOOGLE_AI_STUDIO_DEFAULT_MODEL_ID.to_string();
     }
     String::new()
 }
@@ -831,6 +862,33 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
                 changed = true;
             }
         }
+    }
+
+    // A prompt is required for the dedicated post-process shortcut. Older
+    // stores (and the original fresh-install defaults) left the selection at
+    // `None`, which made the feature silently paste the raw transcript even
+    // after the provider and API key had been configured. Keep a user's
+    // existing choice, but make the bundled prompt active whenever there is no
+    // valid selection.
+    if settings.post_process_prompts.is_empty() {
+        settings.post_process_prompts = default_post_process_prompts();
+        changed = true;
+    }
+    let selected_prompt_is_valid = settings
+        .post_process_selected_prompt_id
+        .as_ref()
+        .is_some_and(|selected_id| {
+            settings
+                .post_process_prompts
+                .iter()
+                .any(|prompt| &prompt.id == selected_id)
+        });
+    if !selected_prompt_is_valid {
+        settings.post_process_selected_prompt_id = settings
+            .post_process_prompts
+            .first()
+            .map(|prompt| prompt.id.clone());
+        changed = true;
     }
 
     changed
@@ -953,6 +1011,7 @@ pub fn get_default_settings() -> AppSettings {
         translation_enabled: false,
         translation_mode: TranslationMode::default(),
         translation_target_language: default_translation_target_language(),
+        translation_provider_id: default_translation_provider_id(),
         selected_text_translation_target_language:
             default_selected_text_translation_target_language(),
         selected_language: "auto".to_string(),
@@ -975,7 +1034,7 @@ pub fn get_default_settings() -> AppSettings {
         post_process_api_keys: default_post_process_api_keys(),
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
-        post_process_selected_prompt_id: None,
+        post_process_selected_prompt_id: Some("default_improve_transcriptions".to_string()),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),
@@ -1190,6 +1249,16 @@ fn apply_settings_migrations(
     // fresh installs use the balanced default from `get_default_settings()`.
     if settings_value.get("translation_mode").is_none() {
         settings.translation_mode = TranslationMode::Direct;
+        updated = true;
+    }
+
+    // Balanced translation used to follow the post-processing provider. Keep
+    // that behavior for existing stores, while fresh installs default to the
+    // local Custom provider so hosted post-processing can be selected without
+    // sending translation requests off-device.
+    if stored_schema_version < 4 || settings_value.get("translation_provider_id").is_none() {
+        settings.translation_provider_id = settings.post_process_provider_id.clone();
+        settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
         updated = true;
     }
 
@@ -1520,11 +1589,44 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
         assert_eq!(settings.translation_mode, TranslationMode::Balanced);
+        assert_eq!(settings.translation_provider_id, "custom");
+        assert_eq!(
+            settings.post_process_models[GOOGLE_AI_STUDIO_PROVIDER_ID],
+            GOOGLE_AI_STUDIO_DEFAULT_MODEL_ID
+        );
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+        assert_eq!(
+            settings.post_process_selected_prompt_id.as_deref(),
+            Some("default_improve_transcriptions")
+        );
         assert_eq!(
             settings.settings_schema_version,
             CURRENT_SETTINGS_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn post_process_defaults_repair_a_missing_prompt_selection() {
+        let mut settings = get_default_settings();
+        settings.post_process_selected_prompt_id = None;
+
+        assert!(ensure_post_process_defaults(&mut settings));
+        assert_eq!(
+            settings.post_process_selected_prompt_id.as_deref(),
+            Some("default_improve_transcriptions")
+        );
+    }
+
+    #[test]
+    fn translation_provider_migration_preserves_previous_post_process_provider() {
+        let stored = serde_json::json!({
+            "settings_schema_version": CURRENT_SETTINGS_SCHEMA_VERSION - 1,
+            "post_process_provider_id": "openrouter"
+        });
+        let mut settings: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(settings.translation_provider_id, "openrouter");
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1613,6 +1715,7 @@ mod tests {
             "whats_new_last_seen_version": default_whats_new_last_seen_version(),
             "overlay_style": "live",
             "translation_mode": "balanced",
+            "translation_provider_id": "custom",
             "transcribe_accelerator": "gpu",
             "transcribe_gpu_device": 2
         });

@@ -124,6 +124,14 @@ async changeTranslationTargetLanguageSetting(language: string) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
+async changeTranslationProviderSetting(providerId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_translation_provider_setting", { providerId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeSelectedTextTranslationTargetLanguageSetting(language: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_selected_text_translation_target_language_setting", { language }) };
@@ -768,6 +776,62 @@ async rescanLocalModels() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getLocalTextModels() : Promise<Result<LocalTextModelInfo[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_local_text_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async addLocalTextModel(name: string, sourceUrl: string, kind: LocalTextModelKind, expectedSha256: string | null) : Promise<Result<LocalTextModelInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("add_local_text_model", { name, sourceUrl, kind, expectedSha256 }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async downloadLocalTextModel(modelId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("download_local_text_model", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteLocalTextModel(modelId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_local_text_model", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async loadLocalTextModel(modelId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_local_text_model", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async unloadLocalTextModel() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unload_local_text_model") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getLocalTextUsage() : Promise<Result<LocalTextUsageSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_local_text_usage") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async updateMicrophoneMode(alwaysOn: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_microphone_mode", { alwaysOn }) };
@@ -1017,7 +1081,7 @@ translation_enabled?: boolean;
  * Selects direct speech translation or the context-aware ASR → text
  * translation cascade.
  */
-translation_mode?: TranslationMode; translation_target_language?: string; 
+translation_mode?: TranslationMode; translation_target_language?: string; translation_provider_id?: string;
 /**
  * Dedicated output language for selected-text translation. Keeping this
  * separate prevents changing the speech-translation shortcut's target.
@@ -1113,6 +1177,10 @@ sha256: string | null } } |
  */
 "Local"
 export type ModelUnloadTimeout = "never" | "immediately" | "min_2" | "min_5" | "min_10" | "min_15" | "hour_1" | "sec_15"
+export type LocalTextModelKind = "generic" | "translate_gemma"
+export type LocalTextModelInfo = { id: string; name: string; filename: string; source_url: string; expected_sha256: string | null; kind: LocalTextModelKind; size_bytes: number | null; is_downloaded: boolean; is_downloading: boolean; downloaded_bytes: number; download_total_bytes: number | null; is_loaded: boolean }
+export type LocalTextModelUsage = { model_id: string; request_count: number; successful_request_count: number; failed_request_count: number; input_characters: number; output_characters: number; input_tokens: number; output_tokens: number; total_latency_ms: number; last_latency_ms: number | null }
+export type LocalTextUsageSnapshot = { loaded_model_id: string | null; total_requests: number; successful_requests: number; failed_requests: number; disk_bytes: number; process_memory_bytes: number; process_cpu_percent: number; gpu_offload_supported: boolean; gpu_layers: number; estimated_device_memory_bytes: number | null; gpu_utilization_percent: number | null; models: LocalTextModelUsage[] }
 export type OrtAcceleratorSetting = "auto" | "cpu" | "cuda" | "directml" | "rocm"
 export type OverlayPosition = "top" | 
 /**

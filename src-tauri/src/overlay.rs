@@ -721,8 +721,18 @@ pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
         builder = builder.data_directory(data_dir.join("webview"));
     }
 
-    if let Err(error) = builder.build() {
-        log::error!("Failed to create selected-text translation overlay: {error}");
+    match builder.build() {
+        Ok(window) => {
+            // The card is informational only. Let clicks pass through to the
+            // app whose selection is being translated, and reassert the
+            // non-focusable flag after WebView creation on Windows where the
+            // native child can otherwise briefly become the active window.
+            let _ = window.set_ignore_cursor_events(true);
+            let _ = window.set_focusable(false);
+        }
+        Err(error) => {
+            log::error!("Failed to create selected-text translation overlay: {error}");
+        }
     }
 }
 
@@ -1108,6 +1118,15 @@ fn present_selection_translation(
             error!("Could not show selected-text translation overlay: {show_error}");
             return;
         }
+
+        // `focusable(false)` is set at construction time, but WebView2 can
+        // recreate its child window while the hidden overlay is first shown.
+        // Reapply the native non-activating/topmost state after every show so
+        // the source application's selection remains the foreground target
+        // for the synthetic Ctrl+C below.
+        let _ = window.set_focusable(false);
+        #[cfg(target_os = "windows")]
+        force_overlay_topmost(&window);
 
         if SELECTION_TRANSLATION_READY.load(Ordering::Acquire) {
             if let Err(emit_error) = window.emit("show-selection-translation", pending.presentation)

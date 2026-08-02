@@ -74,6 +74,14 @@ pub fn send_copy_shortcut(enigo: &mut Enigo) -> Result<(), String> {
     enigo
         .key(c_key_code, enigo::Direction::Click)
         .map_err(|e| format!("Failed to press C key: {e}"))?;
+
+    // Some Windows applications (especially browser editors and remote
+    // desktop clients) inspect the modifier state asynchronously. Keep Ctrl
+    // down for a short, deterministic window after C is clicked so the copy
+    // message cannot race the release.
+    #[cfg(target_os = "windows")]
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
     enigo
         .key(modifier_key, enigo::Direction::Release)
         .map_err(|e| format!("Failed to release copy modifier key: {e}"))?;

@@ -4,10 +4,12 @@ use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, S
 use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
+use crate::managers::local_text::LocalTextModelManager;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::{StreamWorkKind, TranscriptionManager, TranscriptionTask};
 use crate::settings::{
     get_settings, AppSettings, OverlayStyle, TranslationMode, APPLE_INTELLIGENCE_PROVIDER_ID,
+    LOCAL_TEXT_PROVIDER_ID,
 };
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
@@ -170,28 +172,28 @@ const BALANCED_TRANSLATION_HISTORY_PROMPT: &str =
     "Balanced translation via the configured text-model provider";
 
 /// Validate and snapshot the provider settings used by the balanced cascade.
-/// The provider is intentionally shared with the existing post-processing
-/// configuration so local OpenAI-compatible servers (Ollama/LM Studio) work
-/// without a second credential store. The model field should point at a
-/// TranslateGemma 4B (or compatible) deployment.
+/// The provider list and credentials are shared with post-processing, but the
+/// selected provider is independent so a local translation server can be used
+/// alongside a hosted cleanup provider. The model field should point at a
+/// TranslateGemma 4B (or compatible) deployment when using Custom locally.
 fn balanced_translation_request(
     settings: &AppSettings,
 ) -> Result<(crate::settings::PostProcessProvider, String, String), String> {
     let provider = settings
-        .active_post_process_provider()
+        .post_process_provider(&settings.translation_provider_id)
         .cloned()
         .ok_or_else(|| {
-            "Balanced translation needs a configured text-model provider. Open Advanced → Post-processing and select one.".to_string()
+            "Balanced translation needs a configured text-model provider. Choose one in Translation settings and configure it under Advanced → Post-processing.".to_string()
         })?;
 
     if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
         return Err(
-            "Balanced translation currently requires an OpenAI-compatible provider; choose Custom for a local TranslateGemma server."
+            "Balanced translation does not support Apple Intelligence; choose Custom for a local TranslateGemma server or another text provider."
                 .to_string(),
         );
     }
 
-    if provider.base_url.trim().is_empty() {
+    if provider.id != LOCAL_TEXT_PROVIDER_ID && provider.base_url.trim().is_empty() {
         return Err("Balanced translation provider has no base URL configured".to_string());
     }
 
@@ -214,7 +216,8 @@ fn balanced_translation_request(
         .get(&provider.id)
         .cloned()
         .unwrap_or_default();
-    if provider.id != "custom" && api_key.trim().is_empty() {
+    if provider.id != "custom" && provider.id != LOCAL_TEXT_PROVIDER_ID && api_key.trim().is_empty()
+    {
         return Err(format!(
             "Balanced translation provider '{}' needs an API key",
             provider.label
@@ -266,6 +269,7 @@ pub(crate) fn build_balanced_translation_prompt(
 /// separate from `post_process_transcription` so translation does not depend on
 /// the post-processing toggle or prompt selection.
 pub(crate) async fn translate_with_balanced_profile(
+    app: &AppHandle,
     settings: &AppSettings,
     transcription: &str,
     target_language: &str,
@@ -289,7 +293,18 @@ pub(crate) async fn translate_with_balanced_profile(
         "Starting balanced translation with provider '{}' (model: {})",
         provider.id, model
     );
-    match crate::llm_client::send_chat_completion(&provider, api_key, &model, prompt, true).await {
+    let result = if provider.id == LOCAL_TEXT_PROVIDER_ID {
+        let manager = app.state::<Arc<LocalTextModelManager>>().inner().clone();
+        tokio::task::spawn_blocking(move || manager.complete(&model, &prompt))
+            .await
+            .map_err(|error| format!("Local translation task panicked: {error}"))
+            .and_then(|result| result.map_err(|error| error.to_string()))
+            .map(Some)
+    } else {
+        crate::llm_client::send_chat_completion(&provider, api_key, &model, prompt, true).await
+    };
+
+    match result {
         Ok(Some(content)) => {
             let translated = strip_invisible_chars(strip_think_block(&content))
                 .trim()
@@ -330,6 +345,7 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
 }
 
 async fn post_process_transcription(
+    app: &AppHandle,
     settings: &AppSettings,
     transcription: &str,
 ) -> PostProcessOutcome {
@@ -418,6 +434,31 @@ async fn post_process_transcription(
 
     // Keep the real transcript inside the template's <transcript> boundary.
     let user_content = build_prompt_with_transcript(&prompt, transcription);
+
+    if provider.id == LOCAL_TEXT_PROVIDER_ID {
+        let manager = app.state::<Arc<LocalTextModelManager>>().inner().clone();
+        let result =
+            tokio::task::spawn_blocking(move || manager.complete(&model, &user_content)).await;
+        return match result {
+            Ok(Ok(content)) if !content.trim().is_empty() => {
+                let content = strip_invisible_chars(strip_think_block(&content));
+                if content.trim() == transcription.trim() {
+                    PostProcessOutcome::Unchanged { text: content }
+                } else {
+                    PostProcessOutcome::Applied { text: content }
+                }
+            }
+            Ok(Ok(_)) => PostProcessOutcome::Failed {
+                reason: "Local text model returned empty output".to_string(),
+            },
+            Ok(Err(error)) => PostProcessOutcome::Failed {
+                reason: format!("Local text model failed: {error}"),
+            },
+            Err(error) => PostProcessOutcome::Failed {
+                reason: format!("Local text model task panicked: {error}"),
+            },
+        };
+    }
 
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
@@ -697,7 +738,7 @@ pub(crate) async fn process_transcription_output(
     }
 
     if post_process {
-        let outcome = post_process_transcription(&settings, &final_text).await;
+        let outcome = post_process_transcription(app, &settings, &final_text).await;
         match &outcome {
             PostProcessOutcome::Applied { text } | PostProcessOutcome::Unchanged { text } => {
                 post_processed_text = Some(text.clone());
@@ -1197,6 +1238,7 @@ impl ShortcutAction for TranscribeAction {
                                 }
                                 let translated = complete_unless_cancelled(
                                     translate_with_balanced_profile(
+                                        &ah,
                                         &translation_settings,
                                         &source_transcription,
                                         &translation_target,
@@ -1470,6 +1512,7 @@ impl ShortcutAction for SelectedTextTranslationAction {
 
                 let selected = crate::clipboard::capture_selected_text(&app_handle)?;
                 tauri::async_runtime::block_on(translate_with_balanced_profile(
+                    &app_handle,
                     &settings,
                     &selected,
                     &target_language,

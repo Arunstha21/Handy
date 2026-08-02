@@ -32,6 +32,7 @@ use tauri_specta::{collect_commands, collect_events, Builder};
 use env_filter::Builder as EnvFilterBuilder;
 use managers::audio::AudioRecordingManager;
 use managers::history::HistoryManager;
+use managers::local_text::LocalTextModelManager;
 use managers::model::ModelManager;
 use managers::transcription::TranscriptionManager;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -166,6 +167,10 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     );
     let history_manager =
         Arc::new(HistoryManager::new(app_handle).expect("Failed to initialize history manager"));
+    let local_text_model_manager = Arc::new(
+        LocalTextModelManager::new(app_handle)
+            .expect("Failed to initialize local text model manager"),
+    );
 
     // Initialize the transcribe-cpp native backend (logging + backend module
     // registration) once, before any whisper model is loaded.
@@ -179,6 +184,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
+    app_handle.manage(local_text_model_manager.clone());
     app_handle.manage(tray::CurrentTrayIconState::new());
 
     // Note: Shortcuts are NOT initialized here.
@@ -613,6 +619,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_translate_to_english_setting,
             shortcut::change_translation_enabled_setting,
             shortcut::change_translation_target_language_setting,
+            shortcut::change_translation_provider_setting,
             shortcut::change_selected_text_translation_target_language_setting,
             shortcut::change_translation_mode_setting,
             shortcut::change_dual_model_enabled_setting,
@@ -692,6 +699,13 @@ pub fn run(cli_args: CliArgs) {
             commands::models::get_transcription_model_status,
             commands::models::is_model_loading,
             commands::models::rescan_local_models,
+            commands::local_text::get_local_text_models,
+            commands::local_text::add_local_text_model,
+            commands::local_text::download_local_text_model,
+            commands::local_text::delete_local_text_model,
+            commands::local_text::load_local_text_model,
+            commands::local_text::unload_local_text_model,
+            commands::local_text::get_local_text_usage,
             commands::audio::update_microphone_mode,
             commands::audio::get_microphone_mode,
             commands::audio::get_windows_microphone_permission_status,
@@ -1002,6 +1016,9 @@ pub fn run(cli_args: CliArgs) {
             }
             // Teardown transcribe.cpp before exit
             tauri::RunEvent::Exit => {
+                if let Some(local_text_manager) = app.try_state::<Arc<LocalTextModelManager>>() {
+                    let _ = local_text_manager.unload_model();
+                }
                 if let Some(tm) = app.try_state::<Arc<TranscriptionManager>>() {
                     let _ = tm.unload_model();
                 }

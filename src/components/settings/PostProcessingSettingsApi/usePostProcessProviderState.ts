@@ -1,6 +1,11 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useSettings } from "../../../hooks/useSettings";
-import { commands, type PostProcessProvider } from "@/bindings";
+import {
+  commands,
+  type LocalTextModelInfo,
+  type PostProcessProvider,
+} from "@/bindings";
 import type { ModelOption } from "./types";
 import type { DropdownOption } from "../../ui/Dropdown";
 
@@ -9,6 +14,7 @@ type PostProcessProviderState = {
   selectedProviderId: string;
   selectedProvider: PostProcessProvider | undefined;
   isCustomProvider: boolean;
+  isLocalProvider: boolean;
   isAppleProvider: boolean;
   appleIntelligenceUnavailable: boolean;
   baseUrl: string;
@@ -29,8 +35,12 @@ type PostProcessProviderState = {
 };
 
 const APPLE_PROVIDER_ID = "apple_intelligence";
+const CUSTOM_PROVIDER_ID = "custom";
+const LOCAL_PROVIDER_ID = "handy_local";
+const TRANSLATEGEMMA_4B_MODEL_ID = "google/translategemma-4b-it";
 
 export const usePostProcessProviderState = (): PostProcessProviderState => {
+  const { t } = useTranslation();
   const {
     settings,
     isUpdating,
@@ -59,6 +69,23 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
   const isAppleProvider = selectedProvider?.id === APPLE_PROVIDER_ID;
   const [appleIntelligenceUnavailable, setAppleIntelligenceUnavailable] =
     useState(false);
+  const [localTextModels, setLocalTextModels] = useState<LocalTextModelInfo[]>(
+    [],
+  );
+
+  const loadLocalTextModels = useCallback(async () => {
+    const result = await commands.getLocalTextModels();
+    if (result.status === "ok") {
+      setLocalTextModels(result.data);
+    }
+  }, []);
+
+  const isLocalProvider = selectedProvider?.id === LOCAL_PROVIDER_ID;
+
+  useEffect(() => {
+    if (!isLocalProvider) return;
+    void loadLocalTextModels();
+  }, [isLocalProvider, loadLocalTextModels]);
 
   // Use settings directly as single source of truth
   const baseUrl = selectedProvider?.base_url ?? "";
@@ -118,7 +145,7 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
 
   const handleBaseUrlChange = useCallback(
     (value: string) => {
-      if (!selectedProvider || selectedProvider.id !== "custom") {
+      if (!selectedProvider || selectedProvider.id !== CUSTOM_PROVIDER_ID) {
         return;
       }
       const trimmed = value.trim();
@@ -163,22 +190,20 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     [selectedProviderId, updatePostProcessModel],
   );
 
-  const handleRefreshModels = useCallback(() => {
-    if (isAppleProvider) return;
-    void fetchPostProcessModels(selectedProviderId);
-  }, [fetchPostProcessModels, isAppleProvider, selectedProviderId]);
-
   const availableModelsRaw = postProcessModelOptions[selectedProviderId] || [];
 
   const modelOptions = useMemo<ModelOption[]>(() => {
     const seen = new Set<string>();
     const options: ModelOption[] = [];
 
-    const upsert = (value: string | null | undefined) => {
+    const upsert = (
+      value: string | null | undefined,
+      label = value,
+    ) => {
       const trimmed = value?.trim();
       if (!trimmed || seen.has(trimmed)) return;
       seen.add(trimmed);
-      options.push({ value: trimmed, label: trimmed });
+      options.push({ value: trimmed, label: label?.trim() || trimmed });
     };
 
     // Add available models from API
@@ -186,11 +211,30 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
       upsert(candidate);
     }
 
+    if (selectedProviderId === LOCAL_PROVIDER_ID) {
+      for (const candidate of localTextModels) {
+        if (candidate.is_downloaded) {
+          upsert(candidate.id, candidate.name);
+        }
+      }
+    }
+
+    // Custom providers are commonly used for local Ollama, LM Studio, and
+    // llama.cpp servers. Include the official TranslateGemma identifier as a
+    // recommendation while keeping the field creatable for runtime-specific
+    // aliases exposed by those servers.
+    if (selectedProviderId === CUSTOM_PROVIDER_ID) {
+      upsert(
+        TRANSLATEGEMMA_4B_MODEL_ID,
+        t("settings.postProcessing.api.model.translateGemma4b"),
+      );
+    }
+
     // Ensure current model is in the list
     upsert(model);
 
     return options;
-  }, [availableModelsRaw, model]);
+  }, [availableModelsRaw, localTextModels, model, selectedProviderId, t]);
 
   const isBaseUrlUpdating = isUpdating(
     `post_process_base_url:${selectedProviderId}`,
@@ -205,15 +249,29 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     `post_process_models_fetch:${selectedProviderId}`,
   );
 
-  const isCustomProvider = selectedProvider?.id === "custom";
+  const isCustomProvider = selectedProvider?.id === CUSTOM_PROVIDER_ID;
 
-  // No automatic fetching - user must click refresh button
+  const handleRefreshModels = useCallback(() => {
+    if (isAppleProvider) return;
+    if (isLocalProvider) {
+      void loadLocalTextModels();
+      return;
+    }
+    void fetchPostProcessModels(selectedProviderId);
+  }, [
+    fetchPostProcessModels,
+    isAppleProvider,
+    isLocalProvider,
+    loadLocalTextModels,
+    selectedProviderId,
+  ]);
 
   return {
     providerOptions,
     selectedProviderId,
     selectedProvider,
     isCustomProvider,
+    isLocalProvider,
     isAppleProvider,
     appleIntelligenceUnavailable,
     baseUrl,

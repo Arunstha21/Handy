@@ -16,7 +16,8 @@
     "postProcessing": "Post Process",
     "history": "History",
     "debug": "Debug",
-    "about": "About"
+    "about": "About",
+    "localAi": "Local AI"
   },
   "onboarding": {
     "subtitle": "To get started, choose a transcription model",
@@ -186,7 +187,7 @@
           },
           "transcribe_with_post_process": {
             "name": "Dedicated post-process shortcut",
-            "description": "Optional: a separate shortcut that always applies AI post-processing. The normal Transcribe shortcut does not post-process unless you use this dedicated binding."
+            "description": "Optional: a separate shortcut that always applies AI post-processing. The normal Transcribe shortcut does not post-process unless you use this dedicated binding. Configure a provider, model, API key (unless using a local Custom provider), and prompt first."
           }
         },
         "errors": {
@@ -220,6 +221,49 @@
     },
     "translation": {
       "title": "Translation"
+    },
+    "localAi": {
+      "title": "Local AI Runtime",
+      "description": "Manage embedded GGUF text models used for offline translation and post-processing. Handy keeps these files separate from transcription models.",
+      "usage": {
+        "cpu": "Handy CPU",
+        "memory": "Process memory",
+        "disk": "Model disk",
+        "requests": "Requests",
+        "gpuOffload": "GPU offload is active for {{layers}} layers (estimated device memory: {{memory}}). Exact live GPU percentage is unavailable on this platform.",
+        "gpuUnavailable": "GPU offload is not active. The runtime is using CPU layers.",
+        "note": "CPU and memory are Handy process metrics. Disk is the total size of managed local text models. The device estimate is based on the loaded GGUF file size, not a live vendor GPU counter. Usage counters persist locally."
+      },
+      "add": {
+        "title": "Add an offline model",
+        "description": "Paste a direct HTTPS link to a GGUF file. The official TranslateGemma weights are distributed as safetensors; choose a compatible GGUF quantization for the embedded runtime.",
+        "nameLabel": "Model name",
+        "namePlaceholder": "TranslateGemma 4B",
+        "urlLabel": "GGUF URL",
+        "urlPlaceholder": "https://.../translategemma-4b-it.Q4_K_M.gguf",
+        "shaLabel": "SHA-256",
+        "shaPlaceholder": "Optional integrity hash",
+        "kindLabel": "Model type",
+        "translateGemma": "TranslateGemma",
+        "generic": "Generic chat model",
+        "button": "Add model"
+      },
+      "models": {
+        "title": "Managed text models",
+        "empty": "No local text models added yet.",
+        "loaded": "Loaded",
+        "notDownloaded": "Not downloaded",
+        "requests": "requests",
+        "download": "Download",
+        "load": "Load",
+        "unload": "Unload",
+        "delete": "Delete model",
+        "deleteConfirm": "Delete {{name}} and its local model file?",
+        "deleteTitle": "Delete local model"
+      },
+      "errors": {
+        "urlRequired": "Paste a GGUF model link first."
+      }
     },
     "models": {
       "title": "Transcription Models",
@@ -370,11 +414,13 @@
         "label": "Enable translation mode",
         "description": "Enable a separate shortcut that translates speech into a selected language.",
         "modeLabel": "Translation profile",
-        "modeDescription": "Balanced transcribes locally first, then uses the configured text model with your context and glossary. Configure it under Advanced → Post-processing; use a local OpenAI-compatible server to keep the second step local. Direct uses a speech model's built-in translation.",
+        "modeDescription": "Balanced transcribes locally first, then uses the selected text model with your context and glossary. Choose Custom for a local OpenAI-compatible server such as Ollama or LM Studio. Direct uses a speech model's built-in translation.",
         "modes": {
           "balanced": "Balanced (context-aware)",
           "direct": "Direct speech translation"
         },
+        "providerLabel": "Translation text model",
+        "providerDescription": "Choose the provider used after local speech recognition. This is independent from the post-processing provider; choose Custom for a local TranslateGemma, Ollama, or LM Studio setup.",
         "targetLabel": "Translation target",
         "targetDescription": "Choose the language produced by the translation shortcut."
       },
@@ -420,14 +466,17 @@
     "postProcessing": {
       "hotkey": {
         "title": "Dedicated post-process shortcut",
-        "description": "This shortcut records and always runs post-processing. Enabling post-processing does not change the normal Transcribe shortcut."
+        "description": "This shortcut records and always runs post-processing. Enabling post-processing does not change the normal Transcribe shortcut. Configure a provider, model, API key (unless using a local Custom provider), and prompt below before using it."
       },
       "freeModelWarning": "Free OpenRouter models (:free) often have lower availability and daily rate limits. They are not recommended for reliable production use.",
+      "googleAiStudio": {
+        "freeTierNotice": "Google AI Studio's free tier has project-level rate limits, and Google may use free-tier content to improve its products. Do not use it for sensitive transcripts."
+      },
       "api": {
-        "title": "API (OpenAI Compatible)",
+        "title": "Text model provider",
         "provider": {
           "title": "Provider",
-          "description": "Select an OpenAI-compatible provider."
+          "description": "Select the provider used for post-processing. Google AI Studio uses Gemini's native API; Custom supports local OpenAI-compatible servers."
         },
         "appleIntelligence": {
           "unavailable": "Apple Intelligence is not available on this device. Requires an Apple Silicon Mac running macOS Tahoe (26.0) or later with Apple Intelligence enabled in System Settings."
@@ -448,6 +497,7 @@
           "descriptionDefault": "Choose a model exposed by the selected provider.",
           "placeholderWithOptions": "Search or select a model",
           "placeholderNoOptions": "Type a model name",
+          "translateGemma4b": "TranslateGemma 4B (local) · google/translategemma-4b-it",
           "refreshModels": "Refresh models"
         }
       },
@@ -553,7 +603,7 @@
       },
       "postProcessingToggle": {
         "label": "Enable dedicated post-process shortcut",
-        "description": "Registers a separate hotkey that always applies AI post-processing. The normal Transcribe shortcut is unchanged."
+        "description": "Registers a separate hotkey that always applies AI post-processing. The normal Transcribe shortcut is unchanged. Configure a provider, model, API key (unless using a local Custom provider), and prompt first."
       },
       "muteWhileRecording": {
         "label": "Mute While Recording",
