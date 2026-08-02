@@ -132,13 +132,17 @@ function validateTranslations(): void {
       (keyPath) => !hasKeyPath(referenceData, keyPath),
     );
 
+    // i18next is configured with `fallbackLng: "en"`, so newly added English
+    // keys are intentionally allowed to fall back while translators catch up.
+    // Extra keys still fail validation because they indicate stale or invalid
+    // translation structure.
     results[lang] = {
-      valid: missing.length === 0 && extra.length === 0,
+      valid: extra.length === 0,
       missing,
       extra,
     };
 
-    if (missing.length > 0 || extra.length > 0) {
+    if (extra.length > 0) {
       hasErrors = true;
     }
   }
@@ -152,14 +156,22 @@ function validateTranslations(): void {
 
     if (result.valid) {
       console.log(
-        colorize(`✓ ${lang.toUpperCase()}: All keys present`, "green"),
+        colorize(
+          result.missing.length === 0
+            ? `✓ ${lang.toUpperCase()}: All keys present`
+            : `✓ ${lang.toUpperCase()}: ${result.missing.length} keys use English fallback`,
+          "green",
+        ),
       );
     } else {
       console.log(colorize(`✗ ${lang.toUpperCase()}: Issues found`, "red"));
 
       if (result.missing.length > 0) {
         console.log(
-          colorize(`  Missing ${result.missing.length} keys:`, "yellow"),
+          colorize(
+            `  Missing ${result.missing.length} keys (using English fallback):`,
+            "yellow",
+          ),
         );
         result.missing.slice(0, 10).forEach((keyPath) => {
           console.log(`    - ${keyPath.join(".")}`);
