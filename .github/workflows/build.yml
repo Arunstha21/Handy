@@ -32,6 +32,10 @@ on:
         required: false
         type: boolean
         default: false
+      create-updater-artifacts:
+        required: false
+        type: boolean
+        default: false
       repository:
         required: false
         type: string
@@ -248,13 +252,17 @@ jobs:
       - name: Disable platform signing for unsigned builds
         if: ${{ !inputs.sign-binaries }}
         shell: bash
+        env:
+          CREATE_UPDATER_ARTIFACTS: ${{ inputs.create-updater-artifacts }}
         run: |
           bun -e '
             const path = "src-tauri/tauri.conf.json";
             const config = JSON.parse(await Bun.file(path).text());
             config.bundle.macOS.signingIdentity = "-";
             delete config.bundle.windows.signCommand;
-            config.bundle.createUpdaterArtifacts = false;
+            if (process.env.CREATE_UPDATER_ARTIFACTS !== "true") {
+              config.bundle.createUpdaterArtifacts = false;
+            }
             await Bun.write(path, JSON.stringify(config, null, 2) + "\n");
           '
 
@@ -538,6 +546,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.create-updater-artifacts && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.create-updater-artifacts && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
           tagName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
           releaseName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}

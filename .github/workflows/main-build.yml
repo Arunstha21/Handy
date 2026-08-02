@@ -82,4 +82,9 @@ jobs:
           version=$(jq -r .version src-tauri/tauri.conf.json)
           while IFS= read -r -d '' asset; do
             gh release upload "v${version}" "$asset" --repo "${GITHUB_REPOSITORY}" --clobber
-          done < <(find release-artifacts -type f -print0)
+          done < <(
+            find release-artifacts -type f \( \
+              -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o \
+              -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \
+            \) -print0
+          )
