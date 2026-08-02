@@ -86,9 +86,7 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       }
       await updateBinding(shortcutId, recommended.data);
       setActiveConflict(null);
-      toast.success(
-        t("settings.general.shortcut.conflict.restoreRecommended"),
-      );
+      toast.success(t("settings.general.shortcut.conflict.restoreRecommended"));
     } catch (error) {
       console.error("Failed to restore recommended binding:", error);
       toast.error(t("settings.general.shortcut.errors.restore"));
@@ -97,8 +95,7 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
 
   const showSetError = useCallback(
     (error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       const conflict =
         error && typeof error === "object" && "conflict" in error
           ? (error as BindingError).conflict
