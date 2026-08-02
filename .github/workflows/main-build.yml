@@ -48,5 +48,8 @@ jobs:
       target: ${{ matrix.target }}
       build-args: ${{ matrix.args }}
       upload-artifacts: true
-      sign-binaries: true
+      # Forks do not have the upstream Apple/Windows signing secrets. Keep
+      # their main-branch builds useful by producing unsigned artifacts; the
+      # canonical repository still signs release builds.
+      sign-binaries: ${{ github.repository_owner == 'cjpais' }}
     secrets: inherit
