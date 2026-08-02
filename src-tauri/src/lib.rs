@@ -334,6 +334,9 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     // Create the recording overlay window (hidden by default)
     utils::create_recording_overlay(app_handle);
+    // This non-activating overlay is independent from recording visibility so
+    // selected-text translation can work even when the recording overlay is off.
+    utils::create_selection_translation_overlay(app_handle);
 }
 
 #[tauri::command]
@@ -598,6 +601,8 @@ pub fn run(cli_args: CliArgs) {
         .commands(collect_commands![
             shortcut::change_binding,
             shortcut::reset_binding,
+            shortcut::check_binding_conflict,
+            shortcut::get_recommended_binding,
             shortcut::change_ptt_setting,
             shortcut::change_audio_feedback_setting,
             shortcut::change_audio_feedback_volume_setting,
@@ -606,6 +611,12 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_start_hidden_setting,
             shortcut::change_autostart_setting,
             shortcut::change_translate_to_english_setting,
+            shortcut::change_translation_enabled_setting,
+            shortcut::change_translation_target_language_setting,
+            shortcut::change_selected_text_translation_target_language_setting,
+            shortcut::change_translation_mode_setting,
+            shortcut::change_dual_model_enabled_setting,
+            shortcut::change_secondary_model_setting,
             shortcut::change_selected_language_setting,
             shortcut::change_overlay_position_setting,
             shortcut::change_overlay_style_setting,
@@ -634,6 +645,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::delete_post_process_prompt,
             shortcut::set_post_process_selected_prompt,
             shortcut::update_custom_words,
+            shortcut::change_transcription_context_setting,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,
             shortcut::change_mute_while_recording_setting,

@@ -241,6 +241,22 @@ jobs:
           echo "CERT_ID=$CERT_ID" >> $GITHUB_ENV
           echo "Certificate imported."
 
+      # Fork/PR builds deliberately run without release credentials. Remove
+      # platform signing hooks so tauri-bundler does not try to import a
+      # certificate or invoke the production Windows signing command.
+      - name: Disable platform signing for unsigned builds
+        if: ${{ !inputs.sign-binaries }}
+        shell: bash
+        run: |
+          bun -e '
+            const path = "src-tauri/tauri.conf.json";
+            const config = JSON.parse(await Bun.file(path).text());
+            delete config.bundle.macOS.signingIdentity;
+            delete config.bundle.windows.signCommand;
+            config.bundle.createUpdaterArtifacts = false;
+            await Bun.write(path, JSON.stringify(config, null, 2) + "\n");
+          '
+
       - name: Patch asset name pattern
         id: patch-release-name
         shell: bash
@@ -490,7 +506,8 @@ jobs:
           sudo cp -vL "$LIBDIR"/libtranscribe.so* "$LIBDIR"/libggml*.so* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
 
-      - name: Build with Tauri
+      - name: Build with Tauri (signed)
+        if: ${{ inputs.sign-binaries }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -506,6 +523,20 @@ jobs:
           AZURE_TENANT_ID: ${{ inputs.sign-binaries && secrets.AZURE_TENANT_ID || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign-binaries && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign-binaries && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        with:
+          tagName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
+          releaseName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
+          releaseId: ${{ inputs.release-id }}
+          assetNamePattern: ${{ steps.patch-release-name.outputs.platform }}
+          args: ${{ inputs.build-args }}
+
+      # Do not define APPLE_CERTIFICATE at all for unsigned builds. Tauri's
+      # bundler checks whether the variable exists, not whether it is nonempty.
+      - name: Build with Tauri (unsigned)
+        if: ${{ !inputs.sign-binaries }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
           releaseName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}

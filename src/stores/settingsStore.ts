@@ -113,12 +113,28 @@ const settingUpdaters: {
     commands.updateRecordingRetentionPeriod(value as string),
   translate_to_english: (value) =>
     commands.changeTranslateToEnglishSetting(value as boolean),
+  translation_enabled: (value) =>
+    commands.changeTranslationEnabledSetting(value as boolean),
+  translation_mode: (value) =>
+    commands.changeTranslationModeSetting(value as "direct" | "balanced"),
+  translation_target_language: (value) =>
+    commands.changeTranslationTargetLanguageSetting(value as string),
+  selected_text_translation_target_language: (value) =>
+    commands.changeSelectedTextTranslationTargetLanguageSetting(
+      value as string,
+    ),
+  dual_model_enabled: (value) =>
+    commands.changeDualModelEnabledSetting(value as boolean),
+  secondary_model_id: (value) =>
+    commands.changeSecondaryModelSetting((value as string) || null),
   selected_language: (value) =>
     commands.changeSelectedLanguageSetting(value as string),
   overlay_position: (value) =>
     commands.changeOverlayPositionSetting(value as string),
   debug_mode: (value) => commands.changeDebugModeSetting(value as boolean),
   custom_words: (value) => commands.updateCustomWords(value as string[]),
+  transcription_context: (value) =>
+    commands.changeTranscriptionContextSetting(value as string),
   word_correction_threshold: (value) =>
     commands.changeWordCorrectionThresholdSetting(value as number),
   paste_delay_ms: (value) =>
@@ -357,7 +373,13 @@ export const useSettingsStore = create<SettingsStore>()(
 
         // Check if the binding change was successful
         if (!result.data.success) {
-          throw new Error(result.data.error || "Failed to update binding");
+          const err = new Error(
+            result.data.error || "Failed to update binding",
+          ) as Error & { conflict?: (typeof result.data)["conflict"] };
+          if (result.data.conflict) {
+            err.conflict = result.data.conflict;
+          }
+          throw err;
         }
       } catch (error) {
         console.error(`Failed to update binding ${id}:`, error);

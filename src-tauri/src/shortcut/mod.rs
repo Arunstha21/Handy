@@ -9,6 +9,7 @@
 //! The active implementation is determined by the `keyboard_implementation`
 //! setting and can be changed at runtime.
 
+pub mod conflict;
 mod handler;
 pub mod handy_keys;
 pub mod tauri_impl;
@@ -22,8 +23,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
     self, get_settings, AutoSubmitKey, ClipboardHandling, KeyboardImplementation, LLMPrompt,
-    OverlayPosition, OverlayStyle, PasteMethod, ShortcutBinding, SoundTheme, Theme, TypingTool,
-    APPLE_INTELLIGENCE_PROVIDER_ID,
+    OverlayPosition, OverlayStyle, PasteMethod, ShortcutBinding, SoundTheme, Theme,
+    TranslationMode, TypingTool, APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -106,6 +107,74 @@ pub struct BindingResponse {
     success: bool,
     binding: Option<ShortcutBinding>,
     error: Option<String>,
+    /// Present when the save was rejected because the chord conflicts with
+    /// another transcription shortcut (exact duplicate or prefix).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflict: Option<conflict::ShortcutConflict>,
+}
+
+fn binding_ok(binding: ShortcutBinding) -> BindingResponse {
+    BindingResponse {
+        success: true,
+        binding: Some(binding),
+        error: None,
+        conflict: None,
+    }
+}
+
+fn binding_err(error: String) -> BindingResponse {
+    BindingResponse {
+        success: false,
+        binding: None,
+        error: Some(error),
+        conflict: None,
+    }
+}
+
+fn binding_conflict(conflict: conflict::ShortcutConflict) -> BindingResponse {
+    let error = conflict::format_conflict_message(&conflict);
+    BindingResponse {
+        success: false,
+        binding: None,
+        error: Some(error),
+        conflict: Some(conflict),
+    }
+}
+
+/// Global action bindings that must not share an exact or modifier-prefix chord.
+fn active_conflict_checked_bindings(settings: &settings::AppSettings) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for id in conflict::CONFLICT_CHECKED_BINDING_IDS {
+        if *id == "transcribe_with_post_process" && !settings.post_process_enabled {
+            continue;
+        }
+        // Translation shortcut stays registered even when the feature toggle is
+        // off (so the binding can be configured first). Still check it for
+        // conflicts whenever either side is being edited — users hit the bug
+        // as soon as both chords are live.
+        if let Some(binding) = settings.bindings.get(*id) {
+            out.push(((*id).to_string(), binding.current_binding.clone()));
+        }
+    }
+    out
+}
+
+fn conflict_for_candidate(
+    settings: &settings::AppSettings,
+    action_id: &str,
+    candidate: &str,
+) -> Option<conflict::ShortcutConflict> {
+    let others = active_conflict_checked_bindings(settings)
+        .into_iter()
+        .filter(|(id, _)| id != action_id)
+        .collect::<Vec<_>>();
+    conflict::find_conflict_among(
+        action_id,
+        candidate,
+        others
+            .iter()
+            .map(|(id, binding)| (id.as_str(), binding.as_str())),
+    )
 }
 
 #[tauri::command]
@@ -139,11 +208,7 @@ pub fn change_binding(
                 None => {
                     let error_msg = format!("Binding with id '{}' not found in defaults", id);
                     warn!("change_binding error: {}", error_msg);
-                    return Ok(BindingResponse {
-                        success: false,
-                        binding: None,
-                        error: Some(error_msg),
-                    });
+                    return Ok(binding_err(error_msg));
                 }
             }
         }
@@ -157,12 +222,18 @@ pub fn change_binding(
             settings.bindings.insert(id.clone(), b.clone());
             settings::write_settings(&app, settings);
             crate::secure_input::reconcile_fallback(&app);
-            return Ok(BindingResponse {
-                success: true,
-                binding: Some(b.clone()),
-                error: None,
-            });
+            return Ok(binding_ok(b));
         }
+    }
+
+    // Semantic conflict check among transcription shortcuts (exact + prefix).
+    // Done before unregistering so a rejected save leaves the live binding alone.
+    if let Some(conflict) = conflict_for_candidate(&settings, &id, &binding) {
+        warn!(
+            "change_binding rejected: {} conflicts with {}",
+            id, conflict.other_action_id
+        );
+        return Ok(binding_conflict(conflict));
     }
 
     // Unregister the existing binding
@@ -188,11 +259,7 @@ pub fn change_binding(
         let error_msg = format!("Failed to register shortcut: {}", e);
         error!("change_binding error: {}", error_msg);
         restore_registration(&app, &binding_to_modify);
-        return Ok(BindingResponse {
-            success: false,
-            binding: None,
-            error: Some(error_msg),
-        });
+        return Ok(binding_err(error_msg));
     }
 
     // Update the binding in the settings
@@ -203,11 +270,7 @@ pub fn change_binding(
     crate::secure_input::reconcile_fallback(&app);
 
     // Return the updated binding
-    Ok(BindingResponse {
-        success: true,
-        binding: Some(updated_binding),
-        error: None,
-    })
+    Ok(binding_ok(updated_binding))
 }
 
 /// Best-effort re-register of the previous binding after a failed change,
@@ -618,6 +681,116 @@ pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Res
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_translation_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    if enabled {
+        if let Some(binding) = settings.bindings.get("transcribe_with_translation") {
+            if let Some(conflict) = conflict_for_candidate(
+                &settings,
+                "transcribe_with_translation",
+                &binding.current_binding,
+            ) {
+                return Err(conflict::format_conflict_message(&conflict));
+            }
+        }
+    }
+    settings.translation_enabled = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+/// Inspect whether a candidate binding would conflict with other transcription shortcuts.
+/// Does not mutate settings — used by the settings UI for inline warnings.
+#[tauri::command]
+#[specta::specta]
+pub fn check_binding_conflict(
+    app: AppHandle,
+    id: String,
+    binding: String,
+) -> Result<Option<conflict::ShortcutConflict>, String> {
+    let settings = settings::get_settings(&app);
+    Ok(conflict_for_candidate(&settings, &id, &binding))
+}
+
+/// Platform default binding for a shortcut id (for "Restore recommended" actions).
+#[tauri::command]
+#[specta::specta]
+pub fn get_recommended_binding(id: String) -> Result<Option<String>, String> {
+    Ok(conflict::recommended_binding_for(&id))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_translation_target_language_setting(
+    app: AppHandle,
+    language: String,
+) -> Result<(), String> {
+    let language = language.trim().to_string();
+    if language.is_empty() {
+        return Err("Translation target language cannot be empty".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.translation_target_language = language;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_selected_text_translation_target_language_setting(
+    app: AppHandle,
+    language: String,
+) -> Result<(), String> {
+    let language = language.trim().to_string();
+    if language.is_empty() || language == "auto" {
+        return Err("Selected-text translation target language is invalid".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.selected_text_translation_target_language = language;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_translation_mode_setting(app: AppHandle, mode: String) -> Result<(), String> {
+    let parsed = match mode.trim() {
+        "direct" => TranslationMode::Direct,
+        "balanced" => TranslationMode::Balanced,
+        other => return Err(format!("Invalid translation mode: {other}")),
+    };
+    let mut settings = settings::get_settings(&app);
+    settings.translation_mode = parsed;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_dual_model_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.dual_model_enabled = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_secondary_model_setting(
+    app: AppHandle,
+    model_id: Option<String>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    if model_id.as_deref() == Some(settings.selected_model.as_str()) {
+        return Err("The verification model must differ from the primary model".to_string());
+    }
+    settings.secondary_model_id = model_id.filter(|id| !id.trim().is_empty());
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.selected_language = language;
@@ -634,6 +807,7 @@ pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Resu
         // onto Bottom rather than warn.
         "none" | "bottom" => OverlayPosition::Bottom,
         "top" => OverlayPosition::Top,
+        "notch" => OverlayPosition::Notch,
         other => {
             warn!("Invalid overlay position '{}', defaulting to bottom", other);
             OverlayPosition::Bottom
@@ -812,6 +986,23 @@ pub fn update_custom_words(app: AppHandle, words: Vec<String>) -> Result<(), Str
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_transcription_context_setting(app: AppHandle, context: String) -> Result<(), String> {
+    const MAX_CONTEXT_CHARS: usize = 2_000;
+    let context = context.trim().to_string();
+    if context.chars().count() > MAX_CONTEXT_CHARS {
+        return Err(format!(
+            "Transcription context cannot exceed {MAX_CONTEXT_CHARS} characters"
+        ));
+    }
+
+    let mut settings = settings::get_settings(&app);
+    settings.transcription_context = context;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_word_correction_threshold_setting(
     app: AppHandle,
     threshold: f64,
@@ -976,6 +1167,19 @@ pub fn change_auto_submit_key_setting(app: AppHandle, key: String) -> Result<(),
 #[specta::specta]
 pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
+
+    if enabled {
+        if let Some(binding) = settings.bindings.get("transcribe_with_post_process") {
+            if let Some(conflict) = conflict_for_candidate(
+                &settings,
+                "transcribe_with_post_process",
+                &binding.current_binding,
+            ) {
+                return Err(conflict::format_conflict_message(&conflict));
+            }
+        }
+    }
+
     settings.post_process_enabled = enabled;
     settings::write_settings(&app, settings.clone());
 

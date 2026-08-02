@@ -12,11 +12,93 @@ import type {
 import i18n, { syncLanguageFromSettings } from "@/i18n";
 import { getLanguageDirection } from "@/lib/utils/rtl";
 
-type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
+type OverlayState =
+  | "recording"
+  | "streaming"
+  | "transcribing"
+  | "processing"
+  | "translating"
+  | "verifying";
+
+/** Effective placement from the backend — notch styling only for NotchAttached. */
+type OverlayPlacement = "notch_attached" | "top_fallback" | "top" | "bottom";
+
+type NotchPresentation = {
+  safeAreaTop: number;
+  housingWidth: number;
+};
+
+type OverlayPresentation = {
+  state: OverlayState;
+  placement?: OverlayPlacement;
+  notch?: NotchPresentation;
+};
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
 const WAVE_BARS = 9;
+
+function workLabelFromPhase(
+  t: (key: string, opts?: Record<string, unknown>) => string,
+  kind: StreamWorkKind,
+  detail: StreamPhaseEvent | null,
+): string {
+  switch (kind) {
+    case "translating": {
+      const language =
+        detail?.target_language_name || detail?.target_language || undefined;
+      return language
+        ? t("overlay.translatingTo", { language })
+        : t("overlay.translating");
+    }
+    case "verifying": {
+      if (detail?.step != null && detail?.step_total != null) {
+        return t("overlay.verifyingStep", {
+          step: detail.step,
+          total: detail.step_total,
+        });
+      }
+      return t("overlay.verifying");
+    }
+    case "post_processing":
+    case "polishing":
+      return t("overlay.postProcessing");
+    case "transcribing":
+    default:
+      return t("overlay.transcribing");
+  }
+}
+
+function workLabelFromState(
+  t: (key: string, opts?: Record<string, unknown>) => string,
+  state: OverlayState,
+): string {
+  switch (state) {
+    case "processing":
+      return t("overlay.postProcessing");
+    case "translating":
+      return t("overlay.translating");
+    case "verifying":
+      return t("overlay.verifying");
+    case "transcribing":
+    default:
+      return t("overlay.transcribing");
+  }
+}
+
+/** Map settings preference + optional backend placement into CSS stage class. */
+function stageClass(placement: OverlayPlacement): string {
+  switch (placement) {
+    case "notch_attached":
+      return "notch";
+    case "top_fallback":
+    case "top":
+      return "top";
+    case "bottom":
+    default:
+      return "bottom";
+  }
+}
 
 const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
@@ -29,13 +111,14 @@ const RecordingOverlay: React.FC = () => {
   });
   const [phase, setPhase] = useState<StreamPhase>("listening");
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
+  const [phaseDetail, setPhaseDetail] = useState<StreamPhaseEvent | null>(null);
   const [elapsed, setElapsed] = useState(0);
   // Bumped on each new streaming session so the Live card remounts fresh (replays
   // the pop-in, and never animates in from the previous panel's open size).
   const [session, setSession] = useState(0);
-  // Overlay placement (top vs bottom of the screen). The Live panel grows downward
-  // from a top overlay (oldest line under the pill) and upward from a bottom one.
-  const [position, setPosition] = useState<"top" | "bottom">("bottom");
+  // Effective placement from the last show-overlay / placement event.
+  const [placement, setPlacement] = useState<OverlayPlacement>("bottom");
+  const [notch, setNotch] = useState<NotchPresentation | null>(null);
   // True once live text overflows the cap. A top overlay fades its top edge only
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
@@ -51,20 +134,46 @@ const RecordingOverlay: React.FC = () => {
   useEffect(() => {
     const setupEventListeners = async () => {
       const unlistenShow = await listen("show-overlay", async (event) => {
-        await syncLanguageFromSettings();
-        // The Live panel flows downward from a top overlay and upward from a
-        // bottom one; read the placement so the layout can flip to match.
-        try {
-          const settings = await commands.getAppSettings();
-          if (settings.status === "ok") {
-            setPosition(
-              settings.data.overlay_position === "top" ? "top" : "bottom",
-            );
+        // Language synchronization does not need to delay placement. Applying
+        // the combined backend payload immediately prevents a one-frame top-pill
+        // flash before the attached notch shape is painted.
+        void syncLanguageFromSettings();
+        // Prefer backend effective placement when present (object payload).
+        // Older path sends a plain state string.
+        const payload = event.payload as OverlayState | OverlayPresentation;
+
+        let overlayState: OverlayState;
+        if (typeof payload === "string") {
+          overlayState = payload;
+          // Fall back to settings preference; notch is only applied when the
+          // backend later confirms notch_attached via overlay-placement.
+          try {
+            const settings = await commands.getAppSettings();
+            if (settings.status === "ok") {
+              const configured = settings.data.overlay_position;
+              if (configured === "notch") {
+                // Do not force notch styling until geometry confirms attachment.
+                // Default to top until placement event arrives.
+                setPlacement((prev) =>
+                  prev === "notch_attached" ? prev : "top_fallback",
+                );
+              } else if (configured === "top") {
+                setPlacement("top");
+              } else {
+                setPlacement("bottom");
+              }
+            }
+          } catch {
+            // Keep the previous/default placement if settings can't be read.
           }
-        } catch {
-          // Keep the previous/default placement if settings can't be read.
+        } else {
+          overlayState = payload.state;
+          if (payload.placement) {
+            setPlacement(payload.placement);
+          }
+          setNotch(payload.notch ?? null);
         }
-        const overlayState = event.payload as OverlayState;
+
         setState(overlayState);
         if (overlayState === "recording" || overlayState === "streaming") {
           setStreamText({ committed: "", tentative: "" });
@@ -72,11 +181,22 @@ const RecordingOverlay: React.FC = () => {
         if (overlayState === "streaming") {
           setPhase("listening");
           setWorkKind("transcribing");
+          setPhaseDetail(null);
           setElapsed(0);
           setSession((s) => s + 1); // remount the card fresh for this session
         }
         setIsVisible(true);
       });
+
+      const unlistenPlacement = await listen<OverlayPlacement>(
+        "overlay-placement",
+        (event) => {
+          setPlacement(event.payload);
+          if (event.payload !== "notch_attached") {
+            setNotch(null);
+          }
+        },
+      );
 
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
@@ -101,11 +221,13 @@ const RecordingOverlay: React.FC = () => {
       const unlistenPhase = await events.streamPhaseEvent.listen((event) => {
         const payload: StreamPhaseEvent = event.payload;
         setPhase(payload.phase);
+        setPhaseDetail(payload);
         if (payload.kind) setWorkKind(payload.kind);
       });
 
       return () => {
         unlistenShow();
+        unlistenPlacement();
         unlistenHide();
         unlistenLevel();
         unlistenStream();
@@ -149,14 +271,27 @@ const RecordingOverlay: React.FC = () => {
   const fmtTime = (s: number) =>
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
+  const stage = stageClass(placement);
+  const isNotch = stage === "notch";
+  const stageStyle =
+    isNotch && notch
+      ? ({
+          "--notch-safe-top": `${notch.safeAreaTop}px`,
+          "--notch-housing-w": `${notch.housingWidth}px`,
+        } as React.CSSProperties)
+      : undefined;
   // ---- Shared building blocks (one visual language for every overlay form) ----
+  // Dynamic Island: fewer vertical rails on the right wing. Other placements
+  // keep the full waveform in the center.
+  const waveBarCount = isNotch ? 5 : WAVE_BARS;
+  const waveMax = isNotch ? 14 : 18;
   const waveform = (
-    <div className="swave">
-      {levels.map((v, i) => (
+    <div className="swave" aria-hidden="true">
+      {levels.slice(0, waveBarCount).map((v, i) => (
         <i
           key={i}
           style={{
-            height: `${Math.max(3, Math.min(18, 3 + Math.pow(v, 0.7) * 15))}px`,
+            height: `${Math.max(3, Math.min(waveMax, 3 + Math.pow(v, 0.7) * (waveMax - 3)))}px`,
           }}
         />
       ))}
@@ -166,7 +301,7 @@ const RecordingOverlay: React.FC = () => {
   const cancelBtn = (
     <button
       className="sx"
-      aria-label="cancel"
+      aria-label={t("overlay.cancel")}
       onClick={() => commands.cancelOperation()}
     >
       <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -180,32 +315,69 @@ const RecordingOverlay: React.FC = () => {
     </button>
   );
 
-  // dot (left) | waveform (center) | timer + cancel (right) — same structure for
-  // pill & panel, so the Live morph is a pure width change.
-  const listeningRow = (showTimer: boolean, showCancel: boolean) => (
-    <div className="sbase">
-      <div className="sbase-l">
-        <span className="sdot" />
-      </div>
-      {waveform}
-      <div className="sbase-r">
-        {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
-        {showCancel && cancelBtn}
-      </div>
-    </div>
-  );
+  // Empty center rail — measured camera-housing width. Keeps the physical
+  // cutout clear of UI so left/right wings stay visible.
+  const housingRail = <div className="shousing" aria-hidden="true" />;
 
-  // spinner (left) | label (center) | cancel (right) — same 3-zone grid as the
-  // listening row, so the label is centered.
-  const workingRow = (label: string, showCancel: boolean) => (
-    <div className="sbase">
-      <div className="sbase-l">
-        <span className="sspinner" />
+  // Standard pill: dot | waveform | timer + cancel.
+  // Dynamic Island (one capsule around the camera):
+  //   [ ● activity ][  camera housing  ][ |||  ✕ ]
+  const listeningRow = (showTimer: boolean, showCancel: boolean) =>
+    isNotch ? (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sactivity">
+            <span className="sdot" />
+          </span>
+        </div>
+        {housingRail}
+        <div className="sbase-r">
+          {/* The measured right wing is intentionally compact. Keeping only
+              waveform + cancel here prevents the live timer from colliding
+              with the camera-safe center on narrower notch geometries. */}
+          {waveform}
+          {showCancel && cancelBtn}
+        </div>
       </div>
-      <span className="swork-label">{label}</span>
-      <div className="sbase-r">{showCancel && cancelBtn}</div>
-    </div>
-  );
+    ) : (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sdot" />
+        </div>
+        {waveform}
+        <div className="sbase-r">
+          {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
+          {showCancel && cancelBtn}
+        </div>
+      </div>
+    );
+
+  // Working keeps the hardware row quiet: empty left wing, camera void, cancel.
+  // The status sits on its own centered shelf immediately below the housing.
+  // This preserves the same spatial map as recording/live states and keeps every
+  // translated label clear of the physical camera cutout.
+  const workingRow = (label: string, showCancel: boolean) =>
+    isNotch ? (
+      <>
+        <div className="sbase">
+          <div className="sbase-l" aria-hidden="true" />
+          {housingRail}
+          <div className="sbase-r">{showCancel && cancelBtn}</div>
+        </div>
+        <div className="snotch-status" role="status" aria-live="polite">
+          <span className="sspinner" aria-hidden="true" />
+          <span className="snotch-status-label">{label}</span>
+        </div>
+      </>
+    ) : (
+      <div className="sbase">
+        <div className="sbase-l">
+          <span className="sspinner" />
+        </div>
+        <span className="swork-label">{label}</span>
+        <div className="sbase-r">{showCancel && cancelBtn}</div>
+      </div>
+    );
 
   // ---- Live overlay: a pill that sculpts open into a panel ----
   if (state === "streaming") {
@@ -219,59 +391,73 @@ const RecordingOverlay: React.FC = () => {
     const open = hasText;
     const collapsed = working && !hasText;
 
+    // Control rail + live text. Top/notch place the rail above the transcript
+    // (column-reverse + this order, or column with rail first for notch). Bottom
+    // keeps the original text-then-rail DOM so the pill sits under the text.
+    const controlRail = working
+      ? workingRow(workLabelFromPhase(t, workKind, phaseDetail), true)
+      : listeningRow(open, true);
+    const textRegion = (
+      <div className="stext">
+        <div className="stext-clip">
+          <div
+            className={`stext-cap ${overflowing ? "overflowing" : ""}`}
+            ref={capRef}
+            onScroll={handleStreamScroll}
+          >
+            <p>
+              <span className="committed">
+                {streamText.committed ? streamText.committed + " " : ""}
+              </span>
+              <span className="tentative">{streamText.tentative}</span>
+              {/* Drop the blinking caret once finalizing — it's no longer
+                  capturing, and a static spinner conveys the work. */}
+              {!working && <span className="scaret" />}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+
     return (
-      <div dir={direction} className={`ov-stage ${position}`}>
+      <div dir={direction} className={`ov-stage ${stage}`} style={stageStyle}>
         <div
           key={session}
           className={`scard ${open ? "open" : ""} ${collapsed ? "working" : ""} ${
             isVisible ? "" : "leaving"
           }`}
         >
-          <div className="stext">
-            <div className="stext-clip">
-              <div
-                className={`stext-cap ${overflowing ? "overflowing" : ""}`}
-                ref={capRef}
-                onScroll={handleStreamScroll}
-              >
-                <p>
-                  <span className="committed">
-                    {streamText.committed ? streamText.committed + " " : ""}
-                  </span>
-                  <span className="tentative">{streamText.tentative}</span>
-                  {/* Drop the blinking caret once finalizing — it's no longer
-                      capturing, and a static spinner conveys the work. */}
-                  {!working && <span className="scaret" />}
-                </p>
-              </div>
-            </div>
-          </div>
-          {working
-            ? workingRow(
-                workKind === "polishing"
-                  ? t("overlay.processing")
-                  : t("overlay.transcribing"),
-                true,
-              )
-            : listeningRow(open, true)}
+          {isNotch ? (
+            <>
+              {controlRail}
+              {textRegion}
+            </>
+          ) : (
+            <>
+              {textRegion}
+              {controlRail}
+            </>
+          )}
         </div>
       </div>
     );
   }
 
-  // ---- Minimal overlay: exactly one row at a time — waveform (recording), or a
-  // spinner + label (transcribing / processing). Never both. The pill animates its
-  // width between them; the cancel button is in both rows so it stays put.
-  const working = state === "transcribing" || state === "processing";
-  const workLabel =
-    state === "processing"
-      ? t("overlay.processing")
-      : t("overlay.transcribing");
+  // ---- Minimal overlay: one control row for recording. Notch working states
+  // add a compact status shelf beneath it; other placements keep their existing
+  // spinner + label row.
+  const working =
+    state === "transcribing" ||
+    state === "processing" ||
+    state === "translating" ||
+    state === "verifying";
+  const workLabel = workLabelFromState(t, state);
 
   return (
     <div
       dir={direction}
-      className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      className={`ov-stage ${stage} ov-fade ${isVisible ? "show" : ""}`}
+      style={stageStyle}
     >
       <div
         className={`scard compact ${working && isVisible ? "cworking" : ""}`}

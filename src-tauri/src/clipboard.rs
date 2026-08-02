@@ -5,12 +5,134 @@ use crate::settings::{get_settings, AutoSubmitKey, ClipboardHandling, PasteMetho
 use enigo::{Direction, Enigo, Key, Keyboard};
 use log::info;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[cfg(target_os = "linux")]
 use crate::utils::{is_kde_wayland, is_wayland};
+
+// Browser-based editors can publish copied text asynchronously. Give them a
+// full second while still polling quickly enough for native apps to return at
+// their usual near-instant speed.
+const SELECTION_COPY_TIMEOUT: Duration = Duration::from_secs(1);
+const SELECTION_COPY_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SELECTION_COPY_SETTLE_DELAY: Duration = Duration::from_millis(60);
+const MAX_SELECTION_TRANSLATION_CHARS: usize = 12_000;
+
+/// Re-registers global shortcuts on every return path after the synthetic copy
+/// chord. This prevents a user's modifier-only transcription shortcut from
+/// treating Handy's generated Command key as a new recording action.
+struct ShortcutResumeGuard(AppHandle);
+
+impl Drop for ShortcutResumeGuard {
+    fn drop(&mut self) {
+        crate::shortcut::resume_all_shortcuts(&self.0);
+    }
+}
+
+fn selection_text_from_clipboard(
+    candidate: &str,
+    sentinel: &str,
+) -> Result<Option<String>, String> {
+    if candidate == sentinel {
+        return Ok(None);
+    }
+
+    let text = candidate.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.chars().count() > MAX_SELECTION_TRANSLATION_CHARS {
+        return Err(format!(
+            "Selected text is too long. Select at most {MAX_SELECTION_TRANSLATION_CHARS} characters."
+        ));
+    }
+
+    Ok(Some(candidate.to_string()))
+}
+
+/// Copies the active application's selection and restores the previous clipboard
+/// contents before returning. A temporary sentinel prevents a failed copy from
+/// accidentally translating stale clipboard text.
+pub fn capture_selected_text(app_handle: &AppHandle) -> Result<String, String> {
+    // The action starts its copy work from the shortcut's release callback.
+    // Temporarily suspend global bindings before generating Command/Ctrl+C so
+    // that chord cannot recursively fire a modifier-only Handy shortcut.
+    crate::shortcut::suspend_all_shortcuts(app_handle);
+    let _shortcut_resume_guard = ShortcutResumeGuard(app_handle.clone());
+    std::thread::sleep(SELECTION_COPY_SETTLE_DELAY);
+
+    let clipboard = app_handle.clipboard();
+    let saved_text = clipboard.read_text().ok().filter(|text| !text.is_empty());
+    let saved_image = if saved_text.is_none() {
+        clipboard.read_image().ok().map(|image| image.to_owned())
+    } else {
+        None
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sentinel = format!("__handy_selection_copy_{nonce}__");
+
+    clipboard.write_text(&sentinel).map_err(|error| {
+        format!("Failed to prepare clipboard for selected-text translation: {error}")
+    })?;
+
+    let copy_result = (|| {
+        let enigo_state = app_handle.try_state::<EnigoState>().ok_or(
+            "Keyboard access is not initialized. Grant Accessibility permission and try again.",
+        )?;
+        let mut enigo = enigo_state
+            .0
+            .lock()
+            .map_err(|error| format!("Failed to lock keyboard input: {error}"))?;
+        input::send_copy_shortcut(&mut enigo)
+    })();
+
+    let mut selected = None;
+    let mut selection_error = None;
+    if copy_result.is_ok() {
+        let deadline = std::time::Instant::now() + SELECTION_COPY_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            match clipboard.read_text() {
+                Ok(candidate) => match selection_text_from_clipboard(&candidate, &sentinel) {
+                    Ok(Some(text)) => {
+                        selected = Some(text);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        selection_error = Some(error);
+                        break;
+                    }
+                },
+                Err(error) => {
+                    selection_error = Some(format!("Failed to read selected text: {error}"));
+                    break;
+                }
+            }
+            std::thread::sleep(SELECTION_COPY_POLL_INTERVAL);
+        }
+    }
+
+    if let Some(text) = saved_text {
+        let _ = clipboard.write_text(&text);
+    } else if let Some(image) = saved_image {
+        let _ = clipboard.write_image(&image);
+    } else {
+        let _ = clipboard.clear();
+    }
+
+    copy_result?;
+    selection_error.map(Err).unwrap_or_else(|| {
+        selected.ok_or_else(|| {
+            "No text was copied. Select text in another app, then try the shortcut again."
+                .to_string()
+        })
+    })
+}
 
 /// Pastes text using the clipboard: saves current content, writes text, sends paste keystroke, restores clipboard.
 fn paste_via_clipboard(
@@ -711,6 +833,36 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_text_capture_rejects_its_sentinel() {
+        assert_eq!(
+            selection_text_from_clipboard(
+                "__handy_selection_copy_42__",
+                "__handy_selection_copy_42__",
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_text_capture_preserves_meaningful_whitespace() {
+        assert_eq!(
+            selection_text_from_clipboard("  Hello\nworld  ", "sentinel").unwrap(),
+            Some("  Hello\nworld  ".to_string())
+        );
+        assert_eq!(
+            selection_text_from_clipboard(" \n\t ", "sentinel").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_text_capture_limits_large_requests() {
+        let too_large = "a".repeat(MAX_SELECTION_TRANSLATION_CHARS + 1);
+        assert!(selection_text_from_clipboard(&too_large, "sentinel").is_err());
+    }
 
     #[test]
     fn auto_submit_requires_setting_enabled() {

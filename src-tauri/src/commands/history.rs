@@ -1,8 +1,9 @@
-use crate::actions::process_transcription_output;
+use crate::actions::{process_transcription_output, translate_with_balanced_profile};
 use crate::managers::{
     history::{HistoryManager, PaginatedHistory},
-    transcription::TranscriptionManager,
+    transcription::{TranscriptionManager, TranscriptionTask},
 };
+use crate::settings::{get_settings, TranslationMode};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
@@ -83,15 +84,33 @@ pub async fn retry_history_entry_transcription(
 
     transcription_manager.initiate_model_load();
 
+    let settings = get_settings(&app);
+    let balanced_translation =
+        settings.translation_enabled && settings.translation_mode == TranslationMode::Balanced;
+    let translation_target = settings.translation_target_language.clone();
+    let translation_settings = settings.clone();
     let tm = Arc::clone(&transcription_manager);
-    let transcription = tauri::async_runtime::spawn_blocking(move || tm.transcribe(samples))
-        .await
-        .map_err(|e| format!("Transcription task panicked: {}", e))?
-        .map_err(|e| e.to_string())?;
+    let transcription = tauri::async_runtime::spawn_blocking(move || {
+        if balanced_translation {
+            tm.transcribe_with_task(samples, TranscriptionTask::Transcribe)
+        } else {
+            tm.transcribe(samples)
+        }
+    })
+    .await
+    .map_err(|e| format!("Transcription task panicked: {}", e))?
+    .map_err(|e| e.to_string())?;
 
     if transcription.is_empty() {
         return Err("Recording contains no speech".to_string());
     }
+
+    let transcription = if balanced_translation {
+        translate_with_balanced_profile(&translation_settings, &transcription, &translation_target)
+            .await?
+    } else {
+        transcription
+    };
 
     let processed =
         process_transcription_output(&app, &transcription, entry.post_process_requested).await;

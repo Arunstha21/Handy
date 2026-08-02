@@ -1,12 +1,13 @@
 use crate::input;
 use crate::settings;
 use crate::settings::{OverlayPosition, OverlayStyle};
+use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, PhysicalSize};
 
-#[cfg(not(target_os = "macos"))]
-use log::debug;
+use log::{debug, error};
 
 #[cfg(not(target_os = "macos"))]
 use tauri::WebviewWindowBuilder;
@@ -17,6 +18,11 @@ use tauri::WebviewUrl;
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelBuilder, PanelLevel, StyleMask};
 
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker as ObjcMainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSScreen;
+
 #[cfg(target_os = "linux")]
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
@@ -26,6 +32,12 @@ use std::env;
 #[cfg(target_os = "macos")]
 tauri_panel! {
     panel!(RecordingOverlayPanel {
+        config: {
+            can_become_key_window: false,
+            is_floating_panel: true
+        }
+    })
+    panel!(SelectionTranslationOverlayPanel {
         config: {
             can_become_key_window: false,
             is_floating_panel: true
@@ -50,9 +62,124 @@ const OVERLAY_HEIGHT: f64 = 46.0;
 const OVERLAY_STREAM_WIDTH: f64 = 400.0;
 const OVERLAY_STREAM_HEIGHT: f64 = 120.0;
 
+// A separate, non-activating card positioned beneath the cursor. It is not
+// coupled to the recording-overlay preference because selected-text translation
+// must remain visible even when speech overlays are disabled.
+const SELECTION_TRANSLATION_OVERLAY_WIDTH: f64 = 440.0;
+const SELECTION_TRANSLATION_OVERLAY_HEIGHT: f64 = 148.0;
+const SELECTION_TRANSLATION_CURSOR_GAP: f64 = 18.0;
+const SELECTION_TRANSLATION_EDGE_GAP: f64 = 10.0;
+
+// On a notched MacBook the webview reserves the largest footprint each form can
+// animate into. The visible island is still sized from measured housing geometry
+// in CSS, but the native window must not shrink with the resting state or the
+// working/open morph gets clipped at the webview boundary.
+// Webview reserves room for the widest/tallest island state so width morphs
+// (rest → work → open) are not clipped. Visible size is driven by CSS.
+// Compact notch states can grow a status shelf beneath the camera-safe row.
+const OVERLAY_NOTCH_WIDTH: f64 = 480.0;
+const OVERLAY_NOTCH_HEIGHT: f64 = 80.0;
+const OVERLAY_NOTCH_STREAM_WIDTH: f64 = 520.0;
+const OVERLAY_NOTCH_STREAM_HEIGHT: f64 = 148.0;
+
+const DEFAULT_NOTCH_INSET: f64 = 32.0;
+/// Approximate MacBook Dynamic Island / camera-housing width in logical points.
+const DEFAULT_NOTCH_HOUSING_WIDTH: f64 = 126.0;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotchPresentation {
+    safe_area_top: f64,
+    housing_width: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OverlayPresentation {
+    state: String,
+    placement: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notch: Option<NotchPresentation>,
+}
+
+fn normalized_notch_presentation(
+    safe_area_top: f64,
+    housing_width: Option<f64>,
+) -> NotchPresentation {
+    NotchPresentation {
+        // Current MacBook notch depths are around the low 30s. Keep corrupted or
+        // future API values from pushing the visible body outside our window.
+        safe_area_top: safe_area_top.clamp(20.0, 42.0),
+        housing_width: housing_width
+            .unwrap_or(DEFAULT_NOTCH_HOUSING_WIDTH)
+            .clamp(110.0, 200.0),
+    }
+}
+
+/// Effective overlay placement for the current display and user preference.
+/// Frontend applies notch styling only for [`EffectivePlacement::NotchAttached`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectivePlacement {
+    NotchAttached,
+    TopFallback,
+    Top,
+    Bottom,
+}
+
+impl EffectivePlacement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EffectivePlacement::NotchAttached => "notch_attached",
+            EffectivePlacement::TopFallback => "top_fallback",
+            EffectivePlacement::Top => "top",
+            EffectivePlacement::Bottom => "bottom",
+        }
+    }
+
+    pub fn uses_notch_geometry(self) -> bool {
+        matches!(self, EffectivePlacement::NotchAttached)
+    }
+}
+
+/// Resolve placement from settings + whether the cursor monitor actually has a notch.
+fn resolve_effective_placement(app_handle: &AppHandle) -> EffectivePlacement {
+    let settings = settings::get_settings(app_handle);
+    match settings.overlay_position {
+        OverlayPosition::Bottom => EffectivePlacement::Bottom,
+        OverlayPosition::Top => EffectivePlacement::Top,
+        OverlayPosition::Notch => {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(monitor) = get_monitor_with_cursor(app_handle) {
+                    if macos_notch_geometry(&monitor).is_some() {
+                        return EffectivePlacement::NotchAttached;
+                    }
+                }
+                EffectivePlacement::TopFallback
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                EffectivePlacement::TopFallback
+            }
+        }
+    }
+}
+
 /// Overlay window size (logical) for a given UI state.
-fn overlay_dimensions(state: &str) -> (f64, f64) {
-    if state == "streaming" {
+fn overlay_dimensions(app_handle: &AppHandle, state: &str) -> (f64, f64) {
+    let placement = resolve_effective_placement(app_handle);
+    let is_notch = placement.uses_notch_geometry();
+    let streaming = state == "streaming";
+
+    if is_notch {
+        return if streaming {
+            (OVERLAY_NOTCH_STREAM_WIDTH, OVERLAY_NOTCH_STREAM_HEIGHT)
+        } else {
+            (OVERLAY_NOTCH_WIDTH, OVERLAY_NOTCH_HEIGHT)
+        };
+    }
+
+    if streaming {
         (OVERLAY_STREAM_WIDTH, OVERLAY_STREAM_HEIGHT)
     } else {
         (OVERLAY_WIDTH, OVERLAY_HEIGHT)
@@ -60,6 +187,7 @@ fn overlay_dimensions(state: &str) -> (f64, f64) {
 }
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
+static SELECTION_TRANSLATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 const EMIT_THROTTLE_MS: u64 = 33; // ~30 FPS
 
 #[cfg(target_os = "macos")]
@@ -88,6 +216,13 @@ fn update_gtk_layer_shell_anchors(overlay_window: &tauri::webview::WebviewWindow
                 OverlayPosition::Bottom => {
                     gtk_window.set_anchor(Edge::Bottom, true);
                     gtk_window.set_anchor(Edge::Top, false);
+                }
+                OverlayPosition::Notch => {
+                    // Layer-shell has no portable camera-housing primitive.
+                    // Keep the preference, but place it at the top edge on
+                    // Linux rather than silently disabling the overlay.
+                    gtk_window.set_anchor(Edge::Top, true);
+                    gtk_window.set_anchor(Edge::Bottom, false);
                 }
             }
         }
@@ -222,6 +357,120 @@ fn is_mouse_within_monitor(
         && mouse_y < (monitor_y + monitor_height as i32)
 }
 
+/// Position the selected-text translation card directly beneath the cursor,
+/// clamped to its active monitor. The cursor is normally inside the text range
+/// the user just selected, so this keeps the result adjacent without querying
+/// app-specific accessibility selection bounds.
+fn calculate_selection_translation_overlay_position(
+    app_handle: &AppHandle,
+    width: f64,
+    height: f64,
+) -> Option<(f64, f64)> {
+    let monitor = get_monitor_with_cursor(app_handle)?;
+    let scale = monitor.scale_factor();
+    let monitor_x = monitor.position().x as f64 / scale;
+    let monitor_y = monitor.position().y as f64 / scale;
+    let monitor_width = monitor.size().width as f64 / scale;
+    let monitor_height = monitor.size().height as f64 / scale;
+
+    let cursor = input::get_cursor_position(app_handle).map(|(x, y)| {
+        #[cfg(target_os = "windows")]
+        {
+            (x as f64 / scale, y as f64 / scale)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            (x as f64, y as f64)
+        }
+    });
+    let (cursor_x, cursor_y) = cursor.unwrap_or((
+        monitor_x + monitor_width / 2.0,
+        monitor_y + monitor_height / 2.0,
+    ));
+
+    let min_x = monitor_x + SELECTION_TRANSLATION_EDGE_GAP;
+    let min_y = monitor_y + SELECTION_TRANSLATION_EDGE_GAP;
+    let max_x = (monitor_x + monitor_width - width - SELECTION_TRANSLATION_EDGE_GAP).max(min_x);
+    let max_y = (monitor_y + monitor_height - height - SELECTION_TRANSLATION_EDGE_GAP).max(min_y);
+
+    Some((
+        (cursor_x - width / 2.0).clamp(min_x, max_x),
+        (cursor_y + SELECTION_TRANSLATION_CURSOR_GAP).clamp(min_y, max_y),
+    ))
+}
+
+/// Measured macOS camera-housing geometry for the monitor under the cursor.
+///
+/// Combines `safeAreaInsets.top` (notch depth) with the gap between the left
+/// and right auxiliary top areas when AppKit exposes them. The island width is
+/// derived from that gap so it tracks the physical housing instead of a fixed
+/// slab size for every MacBook.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+struct NotchGeometry {
+    /// Top safe-area inset in logical points (notch depth).
+    inset: f64,
+    /// Estimated camera-housing width in logical points, when measurable.
+    housing_width: Option<f64>,
+}
+
+/// Returns notch geometry for the monitor, or `None` when the display has no
+/// camera housing (external monitors, older Macs).
+#[cfg(target_os = "macos")]
+fn macos_notch_geometry(monitor: &tauri::Monitor) -> Option<NotchGeometry> {
+    let marker = ObjcMainThreadMarker::new()?;
+    let screens = NSScreen::screens(marker);
+    let monitor_size = monitor.size();
+
+    let mut best: Option<(f64, NotchGeometry)> = None;
+    for index in 0..screens.count() {
+        let screen = screens.objectAtIndex(index);
+        let scale = screen.backingScaleFactor();
+        let frame = screen.frame();
+        let width = (frame.size.width * scale).round();
+        let height = (frame.size.height * scale).round();
+        let dw = (width - monitor_size.width as f64).abs();
+        let dh = (height - monitor_size.height as f64).abs();
+        let distance = dw + dh;
+        let inset = screen.safeAreaInsets().top;
+
+        // Estimate housing width from the gap between auxiliary top regions.
+        // auxiliaryTopLeftArea / auxiliaryTopRightArea describe the usable menu-
+        // bar strips on either side of the camera housing on notched Macs.
+        let housing_width = {
+            let left = screen.auxiliaryTopLeftArea();
+            let right = screen.auxiliaryTopRightArea();
+            let left_end = left.origin.x + left.size.width;
+            let right_start = right.origin.x;
+            let gap = right_start - left_end;
+            // Only trust a positive gap that's smaller than half the screen.
+            let frame_w = frame.size.width;
+            if gap > 8.0 && gap < frame_w * 0.5 {
+                Some(gap)
+            } else {
+                None
+            }
+        };
+
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((
+                distance,
+                NotchGeometry {
+                    inset,
+                    housing_width,
+                },
+            ));
+        }
+    }
+
+    let (distance, geometry) = best?;
+    // A loose tolerance accommodates AppKit/Tauri rounding at scaled
+    // resolutions, while preventing an external display from inheriting the
+    // MacBook's notch inset.
+    let tolerance = 8.0 * monitor.scale_factor();
+    (distance <= tolerance && geometry.inset > 0.0).then_some(geometry)
+}
+
 /// Returns overlay position in logical coordinates (points on macOS).
 ///
 /// The Bottom anchor uses the macOS work area (visibleFrame) so the overlay
@@ -251,6 +500,21 @@ fn calculate_overlay_position(
     let x = monitor_x + (monitor_width - width) / 2.0;
     let y = match settings.overlay_position {
         OverlayPosition::Top => monitor_y + OVERLAY_TOP_OFFSET,
+        OverlayPosition::Notch => {
+            #[cfg(target_os = "macos")]
+            {
+                macos_notch_geometry(&monitor)
+                    // Start at the physical display edge, not below the safe
+                    // area: the black card is the visual continuation of the
+                    // camera housing, like a Dynamic Island.
+                    .map(|_| monitor_y)
+                    .unwrap_or(monitor_y + OVERLAY_TOP_OFFSET)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                monitor_y + OVERLAY_TOP_OFFSET
+            }
+        }
         OverlayPosition::Bottom => {
             // work_area.position shares monitor.position's global coordinate
             // space, so no monitor offset is added.
@@ -297,7 +561,7 @@ fn windows_overlay_bounds(
     let x = (monitor_position.x as f64 + (monitor_size.width as f64 - width as f64) / 2.0).round()
         as i32;
     let y = match overlay_position {
-        OverlayPosition::Top => {
+        OverlayPosition::Top | OverlayPosition::Notch => {
             (monitor_position.y as f64 + OVERLAY_TOP_OFFSET * scale).round() as i32
         }
         OverlayPosition::Bottom => (monitor_position.y as f64 + monitor_size.height as f64
@@ -361,11 +625,13 @@ fn place_windows_overlay(
 /// Creates the recording overlay window and keeps it hidden by default
 #[cfg(not(target_os = "macos"))]
 pub fn create_recording_overlay(app_handle: &AppHandle) {
+    let (width, height) = overlay_dimensions(app_handle, "recording");
+
     // On Linux (Wayland), monitor detection often fails, but we don't need exact coordinates
     // for Layer Shell as we use anchors. On other platforms, we require a monitor.
     #[cfg(not(target_os = "linux"))]
     {
-        let position = calculate_overlay_position(app_handle, OVERLAY_WIDTH, OVERLAY_HEIGHT);
+        let position = calculate_overlay_position(app_handle, width, height);
         if position.is_none() {
             debug!("Failed to determine overlay position, not creating overlay window");
             return;
@@ -381,7 +647,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     )
     .title("Recording")
     .resizable(false)
-    .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+    .inner_size(width, height)
     .shadow(false)
     .maximizable(false)
     .minimizable(false)
@@ -420,10 +686,91 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 }
 
+/// Creates the non-activating selected-text translation overlay (non-macOS).
+#[cfg(not(target_os = "macos"))]
+pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
+    register_selection_translation_overlay_ready_listener(app_handle);
+    let (width, height) = (
+        SELECTION_TRANSLATION_OVERLAY_WIDTH,
+        SELECTION_TRANSLATION_OVERLAY_HEIGHT,
+    );
+    let position = calculate_selection_translation_overlay_position(app_handle, width, height)
+        .unwrap_or((0.0, 0.0));
+    let mut builder = WebviewWindowBuilder::new(
+        app_handle,
+        "selection_translation_overlay",
+        tauri::WebviewUrl::App("src/overlay/index.html?mode=selection-translation".into()),
+    )
+    .title("Selected Text Translation")
+    .resizable(false)
+    .inner_size(width, height)
+    .position(position.0, position.1)
+    .shadow(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .transparent(true)
+    .focusable(false)
+    .focused(false)
+    .visible(false);
+
+    if let Some(data_dir) = crate::portable::data_dir() {
+        builder = builder.data_directory(data_dir.join("webview"));
+    }
+
+    if let Err(error) = builder.build() {
+        log::error!("Failed to create selected-text translation overlay: {error}");
+    }
+}
+
+/// Creates the non-activating selected-text translation panel (macOS).
+#[cfg(target_os = "macos")]
+pub fn create_selection_translation_overlay(app_handle: &AppHandle) {
+    register_selection_translation_overlay_ready_listener(app_handle);
+    let width = SELECTION_TRANSLATION_OVERLAY_WIDTH;
+    let height = SELECTION_TRANSLATION_OVERLAY_HEIGHT;
+    let (x, y) = calculate_selection_translation_overlay_position(app_handle, width, height)
+        .unwrap_or((0.0, 0.0));
+    match PanelBuilder::<_, SelectionTranslationOverlayPanel>::new(
+        app_handle,
+        "selection_translation_overlay",
+    )
+    .url(WebviewUrl::App(
+        "src/overlay/index.html?mode=selection-translation".into(),
+    ))
+    .title("Selected Text Translation")
+    .position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+    .level(PanelLevel::Status)
+    .size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
+    .has_shadow(false)
+    .transparent(true)
+    .no_activate(true)
+    .corner_radius(0.0)
+    .style_mask(StyleMask::empty().borderless().nonactivating_panel())
+    .with_window(|window| window.decorations(false).transparent(true).focusable(false))
+    .collection_behavior(
+        CollectionBehavior::new()
+            .can_join_all_spaces()
+            .full_screen_auxiliary(),
+    )
+    .build()
+    {
+        Ok(panel) => {
+            panel.hide();
+            debug!("Selected-text translation overlay panel created (hidden)");
+        }
+        Err(error) => log::error!("Failed to create selected-text translation panel: {error}"),
+    }
+}
+
 /// Creates the recording overlay panel and keeps it hidden by default (macOS)
 #[cfg(target_os = "macos")]
 pub fn create_recording_overlay(app_handle: &AppHandle) {
-    if let Some((x, y)) = calculate_overlay_position(app_handle, OVERLAY_WIDTH, OVERLAY_HEIGHT) {
+    let (width, height) = overlay_dimensions(app_handle, "recording");
+    if let Some((x, y)) = calculate_overlay_position(app_handle, width, height) {
         // PanelBuilder creates a Tauri window then converts it to NSPanel.
         // The window remains registered, so get_webview_window() still works.
         match PanelBuilder::<_, RecordingOverlayPanel>::new(app_handle, "recording_overlay")
@@ -431,10 +778,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
             .title("Recording")
             .position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
             .level(PanelLevel::Status)
-            .size(tauri::Size::Logical(tauri::LogicalSize {
-                width: OVERLAY_WIDTH,
-                height: OVERLAY_HEIGHT,
-            }))
+            .size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
             .has_shadow(false)
             .transparent(true)
             .no_activate(true)
@@ -482,7 +826,7 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
 
 fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
     // Size the overlay for this state (compact vs. streaming), then position it.
-    let (width, height) = overlay_dimensions(state);
+    let (width, height) = overlay_dimensions(app_handle, state);
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
         #[cfg(target_os = "linux")]
         update_gtk_layer_shell_anchors(&overlay_window);
@@ -515,6 +859,34 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
         };
         let pos_calc_elapsed = pos_started.elapsed() - set_pos_elapsed;
 
+        let placement = resolve_effective_placement(app_handle);
+        #[cfg(target_os = "macos")]
+        let notch = if placement == EffectivePlacement::NotchAttached {
+            get_monitor_with_cursor(app_handle)
+                .and_then(|monitor| macos_notch_geometry(&monitor))
+                .map(|geometry| {
+                    normalized_notch_presentation(geometry.inset, geometry.housing_width)
+                })
+                .or_else(|| Some(normalized_notch_presentation(DEFAULT_NOTCH_INSET, None)))
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let notch = None;
+
+        // Send placement and measured notch geometry as one payload before the
+        // native window becomes visible. The overlay starts transparent, so the
+        // first painted frame has the correct attached/fallback silhouette.
+        let presentation = OverlayPresentation {
+            state: state.to_string(),
+            placement: placement.as_str().to_string(),
+            notch,
+        };
+        let _ = overlay_window.emit("show-overlay", presentation);
+        // Retain the placement-only event for older overlay webviews during a
+        // development hot reload.
+        let _ = overlay_window.emit("overlay-placement", placement.as_str());
+
         let show_started = std::time::Instant::now();
         let _ = overlay_window.show();
         let show_elapsed = show_started.elapsed();
@@ -530,10 +902,10 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
             log::error!("Failed to re-assert recording overlay position: {error}");
         }
 
-        let _ = overlay_window.emit("show-overlay", state);
         log::debug!(
-            "overlay '{}': set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
+            "overlay '{}' placement={}: set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
             state,
+            placement.as_str(),
             size_elapsed,
             pos_calc_elapsed,
             set_pos_elapsed,
@@ -562,6 +934,16 @@ pub fn show_processing_overlay(app_handle: &AppHandle) {
     show_overlay_state(app_handle, "processing");
 }
 
+/// Shows the translating overlay (dedicated translation action).
+pub fn show_translating_overlay(app_handle: &AppHandle) {
+    show_overlay_state(app_handle, "translating");
+}
+
+/// Shows the dual-model verification overlay.
+pub fn show_verifying_overlay(app_handle: &AppHandle) {
+    show_overlay_state(app_handle, "verifying");
+}
+
 /// Updates the overlay window position based on current settings
 pub fn update_overlay_position(app_handle: &AppHandle) {
     // Positioning queries monitors/cursor (GDK/Xlib on Linux) and moves the
@@ -584,7 +966,7 @@ fn update_overlay_position_on_main(app_handle: &AppHandle) {
             } else {
                 "recording"
             };
-            let (width, height) = overlay_dimensions(state);
+            let (width, height) = overlay_dimensions(app_handle, state);
             if let Err(error) = place_windows_overlay(app_handle, &overlay_window, width, height) {
                 log::error!("Failed to update recording overlay position: {error}");
             }
@@ -595,7 +977,7 @@ fn update_overlay_position_on_main(app_handle: &AppHandle) {
             // Use the window's current size so centering stays correct whether the
             // overlay is in compact or streaming layout.
             let (width, height) = current_overlay_logical_size(&overlay_window)
-                .unwrap_or((OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                .unwrap_or_else(|| overlay_dimensions(app_handle, "recording"));
             if let Some((x, y)) = calculate_overlay_position(app_handle, width, height) {
                 let _ = overlay_window
                     .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
@@ -618,6 +1000,243 @@ pub fn hide_recording_overlay(app_handle: &AppHandle) {
             let _ = window_clone.hide();
         });
     }
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionTranslationPresentation {
+    state: String,
+    target_language: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Clone)]
+struct PendingSelectionTranslationPresentation {
+    presentation: SelectionTranslationPresentation,
+    reposition: bool,
+    generation: u64,
+}
+
+// A hidden WebView may not have attached its frontend event listeners when the
+// first shortcut is pressed. Keep the newest state until that WebView explicitly
+// reports readiness, then replay it. This also recovers if the overlay WebView
+// reloads while a translation is in flight.
+static SELECTION_TRANSLATION_READY: AtomicBool = AtomicBool::new(false);
+static PENDING_SELECTION_TRANSLATION_PRESENTATION: Lazy<
+    Mutex<Option<PendingSelectionTranslationPresentation>>,
+> = Lazy::new(|| Mutex::new(None));
+
+fn remember_selection_translation_presentation(
+    presentation: PendingSelectionTranslationPresentation,
+) {
+    match PENDING_SELECTION_TRANSLATION_PRESENTATION.lock() {
+        Ok(mut pending) => *pending = Some(presentation),
+        Err(lock_error) => {
+            error!("Could not retain selected-text translation presentation: {lock_error}")
+        }
+    }
+}
+
+fn pending_selection_translation_presentation() -> Option<PendingSelectionTranslationPresentation> {
+    match PENDING_SELECTION_TRANSLATION_PRESENTATION.lock() {
+        Ok(pending) => pending.clone(),
+        Err(lock_error) => {
+            error!("Could not read selected-text translation presentation: {lock_error}");
+            None
+        }
+    }
+}
+
+fn clear_selection_translation_presentation(generation: u64) {
+    match PENDING_SELECTION_TRANSLATION_PRESENTATION.lock() {
+        Ok(mut pending) => {
+            if pending
+                .as_ref()
+                .is_some_and(|presentation| presentation.generation == generation)
+            {
+                *pending = None;
+            }
+        }
+        Err(lock_error) => {
+            error!("Could not clear selected-text translation presentation: {lock_error}")
+        }
+    }
+}
+
+fn register_selection_translation_overlay_ready_listener(app_handle: &AppHandle) {
+    let replay_handle = app_handle.clone();
+    app_handle.listen("selection-translation-ready", move |_| {
+        SELECTION_TRANSLATION_READY.store(true, Ordering::Release);
+        debug!("Selected-text translation overlay frontend is ready");
+        if let Some(presentation) = pending_selection_translation_presentation() {
+            present_selection_translation(&replay_handle, presentation);
+        }
+    });
+}
+
+fn present_selection_translation(
+    app_handle: &AppHandle,
+    pending: PendingSelectionTranslationPresentation,
+) {
+    let handle = app_handle.clone();
+    if let Err(schedule_error) = app_handle.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("selection_translation_overlay") else {
+            error!("Selected-text translation overlay window is unavailable");
+            return;
+        };
+
+        if pending.reposition {
+            if let Some((x, y)) = calculate_selection_translation_overlay_position(
+                &handle,
+                SELECTION_TRANSLATION_OVERLAY_WIDTH,
+                SELECTION_TRANSLATION_OVERLAY_HEIGHT,
+            ) {
+                if let Err(position_error) =
+                    window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+                {
+                    error!(
+                        "Could not position selected-text translation overlay: {position_error}"
+                    );
+                }
+            }
+        }
+
+        // Show first so an initially hidden WebView has a chance to finish
+        // loading. The ready callback below replays this state if the event
+        // listener was not attached yet.
+        if let Err(show_error) = window.show() {
+            error!("Could not show selected-text translation overlay: {show_error}");
+            return;
+        }
+
+        if SELECTION_TRANSLATION_READY.load(Ordering::Acquire) {
+            if let Err(emit_error) = window.emit("show-selection-translation", pending.presentation)
+            {
+                error!("Could not update selected-text translation overlay: {emit_error}");
+            }
+        } else {
+            debug!("Selected-text translation overlay is waiting for frontend readiness");
+        }
+    }) {
+        error!("Could not schedule selected-text translation overlay: {schedule_error}");
+    }
+}
+
+fn dismiss_selection_translation_after(
+    app_handle: &AppHandle,
+    generation: u64,
+    delay: std::time::Duration,
+) {
+    let dismiss_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        if SELECTION_TRANSLATION_GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+
+        clear_selection_translation_presentation(generation);
+        let hide_event_handle = dismiss_handle.clone();
+        if let Err(schedule_error) = dismiss_handle.run_on_main_thread(move || {
+            let Some(window) =
+                hide_event_handle.get_webview_window("selection_translation_overlay")
+            else {
+                error!("Selected-text translation overlay window is unavailable during dismissal");
+                return;
+            };
+            if let Err(emit_error) = window.emit("hide-selection-translation", ()) {
+                error!("Could not hide selected-text translation overlay content: {emit_error}");
+            }
+        }) {
+            error!("Could not schedule selected-text translation dismissal: {schedule_error}");
+            return;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(180));
+        let hide_window_handle = dismiss_handle.clone();
+        if let Err(schedule_error) = dismiss_handle.run_on_main_thread(move || {
+            let Some(window) =
+                hide_window_handle.get_webview_window("selection_translation_overlay")
+            else {
+                error!("Selected-text translation overlay window is unavailable while hiding");
+                return;
+            };
+            if let Err(hide_error) = window.hide() {
+                error!("Could not hide selected-text translation overlay: {hide_error}");
+            }
+        }) {
+            error!("Could not schedule selected-text translation hide: {schedule_error}");
+        }
+    });
+}
+
+fn show_selected_text_translation(
+    app_handle: &AppHandle,
+    state: &str,
+    target_language: Option<String>,
+    text: Option<String>,
+    reposition: bool,
+    dismiss_after: Option<std::time::Duration>,
+) {
+    let presentation = SelectionTranslationPresentation {
+        state: state.to_string(),
+        target_language,
+        text,
+    };
+    // Every presentation invalidates a previous auto-dismiss timer. Without
+    // this, a completed earlier translation could hide a newer loading/result
+    // card while it is still active.
+    let generation = SELECTION_TRANSLATION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let pending = PendingSelectionTranslationPresentation {
+        presentation,
+        reposition,
+        generation,
+    };
+    remember_selection_translation_presentation(pending.clone());
+    present_selection_translation(app_handle, pending);
+
+    if let Some(delay) = dismiss_after {
+        dismiss_selection_translation_after(app_handle, generation, delay);
+    }
+}
+
+/// Shows immediate feedback while Handy safely copies and translates the selection.
+pub fn show_selected_text_translation_loading(app_handle: &AppHandle, target_language: &str) {
+    show_selected_text_translation(
+        app_handle,
+        "loading",
+        Some(target_language.to_string()),
+        None,
+        true,
+        None,
+    );
+}
+
+/// Shows the translated text near the original selection, without modifying it.
+pub fn show_selected_text_translation_result(
+    app_handle: &AppHandle,
+    target_language: &str,
+    text: String,
+) {
+    show_selected_text_translation(
+        app_handle,
+        "success",
+        Some(target_language.to_string()),
+        Some(text),
+        false,
+        Some(std::time::Duration::from_secs(7)),
+    );
+}
+
+/// Shows a short, recoverable error in the same non-activating overlay.
+pub fn show_selected_text_translation_error(app_handle: &AppHandle, message: String) {
+    show_selected_text_translation(
+        app_handle,
+        "error",
+        None,
+        Some(message),
+        true,
+        Some(std::time::Duration::from_secs(5)),
+    );
 }
 
 // Cached "overlay is enabled" flag, kept in sync with overlay_style. Avoids
@@ -675,6 +1294,24 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notch_presentation_clamps_untrusted_appkit_geometry() {
+        let too_small = normalized_notch_presentation(4.0, Some(80.0));
+        assert_eq!(too_small.safe_area_top, 20.0);
+        assert_eq!(too_small.housing_width, 110.0);
+
+        let too_large = normalized_notch_presentation(90.0, Some(500.0));
+        assert_eq!(too_large.safe_area_top, 42.0);
+        assert_eq!(too_large.housing_width, 200.0);
+    }
+
+    #[test]
+    fn notch_presentation_uses_hardware_sized_default() {
+        let geometry = normalized_notch_presentation(DEFAULT_NOTCH_INSET, None);
+        assert_eq!(geometry.safe_area_top, DEFAULT_NOTCH_INSET);
+        assert_eq!(geometry.housing_width, DEFAULT_NOTCH_HOUSING_WIDTH);
+    }
 
     #[test]
     fn monitor_hit_test_uses_half_open_physical_bounds() {

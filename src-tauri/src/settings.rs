@@ -110,12 +110,30 @@ pub struct PostProcessProvider {
 #[serde(rename_all = "lowercase")]
 pub enum OverlayPosition {
     Top,
+    /// Attach the overlay to the camera housing on a notched macOS display.
+    /// Non-macOS platforms and displays without a notch fall back to `Top` at
+    /// placement time while preserving this user preference.
+    Notch,
     // `none` is retired: overlay visibility is owned by `OverlayStyle` now. The
     // alias keeps legacy stores (`"overlay_position": "none"`) deserializing
     // instead of failing the whole load; the one-time overlay migration reads the
     // raw stored string to recover the old "hidden" intent as `OverlayStyle::None`.
     #[serde(alias = "none")]
     Bottom,
+}
+
+/// How the dedicated translation shortcut produces its output.
+///
+/// `Direct` delegates translation to a speech model such as Canary. `Balanced`
+/// keeps speech recognition and text translation separate: Handy transcribes
+/// locally first, then sends the transcript plus the user's context/glossary to
+/// the configured text-model provider.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationMode {
+    Direct,
+    #[default]
+    Balanced,
 }
 
 /// Which recording overlay to display. `Minimal` and `Live` share one base
@@ -371,6 +389,11 @@ pub struct AppSettings {
     pub whats_new_last_seen_version: String,
     #[serde(default = "default_model")]
     pub selected_model: String,
+    /// Optional second local ASR model used for experimental verification.
+    #[serde(default)]
+    pub secondary_model_id: Option<String>,
+    #[serde(default)]
+    pub dual_model_enabled: bool,
     #[serde(default)]
     pub onboarding_completed: bool,
     #[serde(default = "default_always_on_microphone")]
@@ -383,6 +406,20 @@ pub struct AppSettings {
     pub selected_output_device: Option<String>,
     #[serde(default = "default_translate_to_english")]
     pub translate_to_english: bool,
+    /// Enables the dedicated translation action. This is intentionally separate
+    /// from source-language selection and from ordinary transcription.
+    #[serde(default)]
+    pub translation_enabled: bool,
+    /// Selects direct speech translation or the context-aware ASR → text
+    /// translation cascade.
+    #[serde(default)]
+    pub translation_mode: TranslationMode,
+    #[serde(default = "default_translation_target_language")]
+    pub translation_target_language: String,
+    /// Dedicated output language for selected-text translation. Keeping this
+    /// separate prevents changing the speech-translation shortcut's target.
+    #[serde(default = "default_selected_text_translation_target_language")]
+    pub selected_text_translation_target_language: String,
     #[serde(default = "default_selected_language")]
     pub selected_language: String,
     #[serde(default = "default_overlay_position")]
@@ -393,6 +430,10 @@ pub struct AppSettings {
     pub log_level: LogLevel,
     #[serde(default)]
     pub custom_words: Vec<String>,
+    /// Optional domain context passed to models that support an initial prompt.
+    /// This is a decoding hint (names, jargon, topic), not an instruction.
+    #[serde(default)]
+    pub transcription_context: String,
     #[serde(default)]
     pub model_unload_timeout: ModelUnloadTimeout,
     #[serde(default = "default_word_correction_threshold")]
@@ -475,7 +516,7 @@ fn default_model() -> String {
     "".to_string()
 }
 
-const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 3;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -491,6 +532,14 @@ fn default_always_on_microphone() -> bool {
 
 fn default_translate_to_english() -> bool {
     false
+}
+
+fn default_translation_target_language() -> String {
+    "en".to_string()
+}
+
+fn default_selected_text_translation_target_language() -> String {
+    "en".to_string()
 }
 
 fn default_start_hidden() -> bool {
@@ -830,6 +879,45 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: default_post_process_shortcut.to_string(),
         },
     );
+    #[cfg(target_os = "windows")]
+    let default_translation_shortcut = "ctrl+alt+space";
+    #[cfg(target_os = "macos")]
+    let default_translation_shortcut = "option+control+space";
+    #[cfg(target_os = "linux")]
+    let default_translation_shortcut = "ctrl+alt+space";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let default_translation_shortcut = "alt+ctrl+space";
+
+    bindings.insert(
+        "transcribe_with_translation".to_string(),
+        ShortcutBinding {
+            id: "transcribe_with_translation".to_string(),
+            name: "Translate Speech".to_string(),
+            description: "Translates your speech into the selected target language.".to_string(),
+            default_binding: default_translation_shortcut.to_string(),
+            current_binding: default_translation_shortcut.to_string(),
+        },
+    );
+    #[cfg(target_os = "windows")]
+    let default_selected_text_translation_shortcut = "ctrl+alt+t";
+    #[cfg(target_os = "macos")]
+    let default_selected_text_translation_shortcut = "option+command+t";
+    #[cfg(target_os = "linux")]
+    let default_selected_text_translation_shortcut = "ctrl+alt+t";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let default_selected_text_translation_shortcut = "alt+ctrl+t";
+
+    bindings.insert(
+        "translate_selected_text".to_string(),
+        ShortcutBinding {
+            id: "translate_selected_text".to_string(),
+            name: "Translate Selected Text".to_string(),
+            description: "Translates selected text into the configured target language and shows the result near your cursor."
+                .to_string(),
+            default_binding: default_selected_text_translation_shortcut.to_string(),
+            current_binding: default_selected_text_translation_shortcut.to_string(),
+        },
+    );
     bindings.insert(
         "cancel".to_string(),
         ShortcutBinding {
@@ -854,17 +942,25 @@ pub fn get_default_settings() -> AppSettings {
         show_whats_new_on_update: default_show_whats_new_on_update(),
         whats_new_last_seen_version: default_whats_new_last_seen_version(),
         selected_model: "".to_string(),
+        secondary_model_id: None,
+        dual_model_enabled: false,
         onboarding_completed: false,
         always_on_microphone: false,
         selected_microphone: None,
         clamshell_microphone: None,
         selected_output_device: None,
         translate_to_english: false,
+        translation_enabled: false,
+        translation_mode: TranslationMode::default(),
+        translation_target_language: default_translation_target_language(),
+        selected_text_translation_target_language:
+            default_selected_text_translation_target_language(),
         selected_language: "auto".to_string(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
         log_level: default_log_level(),
         custom_words: Vec::new(),
+        transcription_context: String::new(),
         model_unload_timeout: ModelUnloadTimeout::default(),
         word_correction_threshold: default_word_correction_threshold(),
         history_limit: default_history_limit(),
@@ -1068,6 +1164,35 @@ fn apply_settings_migrations(
         updated = true;
     }
 
+    if stored_schema_version < 2 {
+        // The dedicated translation action supersedes the old global toggle.
+        // Preserve an existing X->English preference as the initial target;
+        // ordinary transcription remains the default for new users.
+        if settings.translate_to_english {
+            settings.translation_enabled = true;
+            settings.translation_target_language = "en".to_string();
+        }
+        settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+        updated = true;
+    }
+
+    if stored_schema_version < 3 {
+        // Selected-text translation originally shared the speech-translation
+        // target. Preserve that choice once, then let the two controls diverge.
+        settings.selected_text_translation_target_language =
+            settings.translation_target_language.clone();
+        settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+        updated = true;
+    }
+
+    // Existing stores predate the balanced cascade. Keep their direct speech
+    // translation behavior until the user explicitly chooses a new profile;
+    // fresh installs use the balanced default from `get_default_settings()`.
+    if settings_value.get("translation_mode").is_none() {
+        settings.translation_mode = TranslationMode::Direct;
+        updated = true;
+    }
+
     // One-time overlay migration (only while the new key is absent): the retired
     // overlay_position `none` meant "hide the overlay" → OverlayStyle::None; any
     // other position had it visible → Live. The position enum no longer has a
@@ -1137,6 +1262,7 @@ mod tests {
             .expect("all AppSettings fields need serde defaults");
         assert!(settings.push_to_talk);
         assert!(!settings.audio_feedback);
+        assert_eq!(settings.translation_mode, TranslationMode::Balanced);
         // Bindings default to empty; the load path merges the real defaults in.
         assert!(settings.bindings.is_empty());
     }
@@ -1255,8 +1381,43 @@ mod tests {
         assert_eq!(settings.log_level, LogLevel::Debug);
         assert_eq!(settings.sound_theme, SoundTheme::Pop);
 
-        // A current-format store must not be rewritten on every read.
-        assert!(!apply_settings_migrations(&mut settings, &stored));
+        // The v0.9 store predates the dedicated translation settings and must
+        // receive the one-time schema migration exactly once.
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(
+            settings.settings_schema_version,
+            CURRENT_SETTINGS_SCHEMA_VERSION
+        );
+        assert!(!settings.translation_enabled);
+        assert_eq!(settings.translation_mode, TranslationMode::Direct);
+    }
+
+    #[test]
+    fn pre_schema_store_keeps_direct_translation_until_user_changes_profile() {
+        let stored = serde_json::json!({
+            "selected_model": "whisper-large-v3-turbo",
+            "translation_enabled": true
+        });
+        let mut settings: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(settings.translation_mode, TranslationMode::Direct);
+    }
+
+    #[test]
+    fn selected_text_target_migration_preserves_existing_translation_target() {
+        let stored = serde_json::json!({
+            "settings_schema_version": 2,
+            "translation_target_language": "fr"
+        });
+        let mut settings: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(settings.selected_text_translation_target_language, "fr");
+        assert_eq!(
+            settings.settings_schema_version,
+            CURRENT_SETTINGS_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -1358,6 +1519,7 @@ mod tests {
     fn default_settings_disable_auto_submit() {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
+        assert_eq!(settings.translation_mode, TranslationMode::Balanced);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
         assert_eq!(
             settings.settings_schema_version,
@@ -1450,6 +1612,7 @@ mod tests {
             "onboarding_completed": false,
             "whats_new_last_seen_version": default_whats_new_last_seen_version(),
             "overlay_style": "live",
+            "translation_mode": "balanced",
             "transcribe_accelerator": "gpu",
             "transcribe_gpu_device": 2
         });

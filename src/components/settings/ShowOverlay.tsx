@@ -39,14 +39,19 @@ export const ShowOverlay: React.FC<ShowOverlayProps> = React.memo(
         value: "top",
         label: t("settings.advanced.overlay.position.options.top"),
       },
+      {
+        value: "notch",
+        label: t("settings.advanced.overlay.position.options.notch"),
+      },
     ];
 
     const selectedStyle = (getSetting("overlay_style") ||
       "live") as OverlayStyle;
-    // Only "top" and "bottom" are selectable; anything else (empty, or a legacy
-    // "none" from before the position was retired) falls back to "bottom".
+    const configuredPosition = getSetting("overlay_position");
     const selectedPosition: OverlayPosition =
-      getSetting("overlay_position") === "top" ? "top" : "bottom";
+      configuredPosition === "top" || configuredPosition === "notch"
+        ? configuredPosition
+        : "bottom";
 
     return (
       <>

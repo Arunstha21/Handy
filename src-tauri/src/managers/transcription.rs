@@ -22,7 +22,7 @@ use transcribe_cpp::{
 };
 use transcribe_rs::{
     onnx::{
-        canary::CanaryModel,
+        canary::{CanaryModel, CanaryParams},
         cohere::CohereModel,
         gigaam::GigaAMModel,
         moonshine::{MoonshineModel, MoonshineVariant, StreamingModel},
@@ -77,10 +77,160 @@ pub enum StreamPhase {
 
 /// Semantic kind of "working" phase, used to localize the spinner label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum StreamWorkKind {
     Transcribing,
     Polishing,
+    Translating,
+    Verifying,
+    PostProcessing,
+}
+
+/// Immutable output intent captured for one recording. Keeping this separate
+/// from persisted settings prevents a user changing a setting mid-recording
+/// from changing the task that is already in flight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TranscriptionTask {
+    Transcribe,
+    Translate { target_language: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TranscriptCandidate {
+    pub model_id: String,
+    pub text: String,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionMethod {
+    PrimaryAgreement,
+    PrimaryFallback,
+    SecondaryFallback,
+    /// Primary retained despite low agreement; UI should surface a warning.
+    LowAgreementWarning,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolvedTranscript {
+    pub text: String,
+    pub selected_model_id: String,
+    pub agreement_score: f32,
+    pub method: ResolutionMethod,
+    pub candidates: Vec<TranscriptCandidate>,
+}
+
+/// Compact verification summary for history, overlay, and diagnostics.
+/// Candidate full text is intentionally omitted unless debug diagnostics are on.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct VerificationReport {
+    pub primary_model_id: String,
+    pub secondary_model_id: String,
+    pub selected_model_id: String,
+    pub agreement_score: f32,
+    pub method: ResolutionMethod,
+    pub primary_elapsed_ms: u64,
+    pub secondary_elapsed_ms: u64,
+    pub primary_error: Option<String>,
+    pub secondary_error: Option<String>,
+    pub low_agreement: bool,
+}
+
+impl ResolvedTranscript {
+    pub fn to_verification_report(&self) -> Option<VerificationReport> {
+        let primary = self.candidates.first()?;
+        let secondary = self.candidates.get(1)?;
+        let low_agreement = matches!(self.method, ResolutionMethod::LowAgreementWarning)
+            || (self.agreement_score > 0.0 && self.agreement_score < 0.80);
+        Some(VerificationReport {
+            primary_model_id: primary.model_id.clone(),
+            secondary_model_id: secondary.model_id.clone(),
+            selected_model_id: self.selected_model_id.clone(),
+            agreement_score: self.agreement_score,
+            method: self.method.clone(),
+            primary_elapsed_ms: primary.elapsed_ms,
+            secondary_elapsed_ms: secondary.elapsed_ms,
+            primary_error: primary.error.clone(),
+            secondary_error: secondary.error.clone(),
+            low_agreement,
+        })
+    }
+}
+
+fn normalized_transcript(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Agreement threshold: at or above this score, models are considered to agree.
+pub const AGREEMENT_HIGH_THRESHOLD: f32 = 0.80;
+
+/// Resolve two model outputs conservatively. Agreement keeps the primary
+/// formatting; disagreement keeps a complete primary sentence rather than
+/// manufacturing a potentially incoherent word-by-word splice, but marks the
+/// result with [`ResolutionMethod::LowAgreementWarning`] so the UI can surface
+/// that verification did not confirm the primary. Never splices words from
+/// both transcripts.
+pub fn resolve_transcript_candidates(
+    candidates: Vec<TranscriptCandidate>,
+) -> Result<ResolvedTranscript> {
+    let primary = candidates
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No transcription candidates were produced"))?;
+    let primary_ok = primary.error.is_none() && !primary.text.trim().is_empty();
+    let secondary = candidates
+        .iter()
+        .skip(1)
+        .find(|candidate| candidate.error.is_none() && !candidate.text.trim().is_empty());
+
+    if primary_ok {
+        if let Some(secondary) = secondary {
+            let primary_normalized = normalized_transcript(&primary.text);
+            let secondary_normalized = normalized_transcript(&secondary.text);
+            let agreement_score =
+                strsim::normalized_levenshtein(&primary_normalized, &secondary_normalized) as f32;
+            let method = if agreement_score >= AGREEMENT_HIGH_THRESHOLD {
+                ResolutionMethod::PrimaryAgreement
+            } else {
+                // Keep primary text (no splicing) but expose low agreement.
+                ResolutionMethod::LowAgreementWarning
+            };
+            return Ok(ResolvedTranscript {
+                text: primary.text.clone(),
+                selected_model_id: primary.model_id.clone(),
+                agreement_score,
+                method,
+                candidates,
+            });
+        }
+
+        // Secondary failed or empty — primary survives with a fallback marker.
+        return Ok(ResolvedTranscript {
+            text: primary.text.clone(),
+            selected_model_id: primary.model_id.clone(),
+            agreement_score: 0.0,
+            method: ResolutionMethod::PrimaryFallback,
+            candidates,
+        });
+    }
+
+    let secondary = secondary.ok_or_else(|| {
+        anyhow::anyhow!(
+            "All transcription candidates failed: {}",
+            primary.error.as_deref().unwrap_or("empty transcription")
+        )
+    })?;
+    Ok(ResolvedTranscript {
+        text: secondary.text.clone(),
+        selected_model_id: secondary.model_id.clone(),
+        agreement_score: 0.0,
+        method: ResolutionMethod::SecondaryFallback,
+        candidates,
+    })
 }
 
 /// Emitted to switch the streaming overlay to a working spinner.
@@ -90,6 +240,21 @@ pub struct StreamPhaseEvent {
     /// Present only when `phase` is `Working`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<StreamWorkKind>,
+    /// Optional language code (e.g. `ru`) for translating labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_language: Option<String>,
+    /// Optional human-readable language name (e.g. `Russian`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_language_name: Option<String>,
+    /// Optional model id when verifying / dual-model work is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Optional step index for multi-step work (1-based).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    /// Optional total steps for multi-step work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_total: Option<u32>,
 }
 
 /// Commands sent to the streaming worker thread. Audio frames and the finalize
@@ -894,8 +1059,15 @@ impl TranscriptionManager {
         let settings = get_settings(&self.app_handle);
         let effective_language =
             effective_language_for_model(&settings, self.model_manager.as_ref(), &model_id);
+        let stream_task = if settings.translate_to_english {
+            TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            }
+        } else {
+            TranscriptionTask::Transcribe
+        };
         let run_plan = transcribe_cpp_run_plan(
-            settings.translate_to_english,
+            &stream_task,
             &effective_language,
             &languages,
             supports_translate,
@@ -1094,9 +1266,27 @@ impl TranscriptionManager {
 
     /// Emit a working-phase event to the streaming overlay (spinner + label).
     pub fn emit_stream_working(&self, kind: StreamWorkKind) {
+        self.emit_stream_working_detail(kind, None, None, None, None, None);
+    }
+
+    /// Emit a working-phase event with optional translation/verification context.
+    pub fn emit_stream_working_detail(
+        &self,
+        kind: StreamWorkKind,
+        target_language: Option<String>,
+        target_language_name: Option<String>,
+        model_id: Option<String>,
+        step: Option<u32>,
+        step_total: Option<u32>,
+    ) {
         let _ = StreamPhaseEvent {
             phase: StreamPhase::Working,
             kind: Some(kind),
+            target_language,
+            target_language_name,
+            model_id,
+            step,
+            step_total,
         }
         .emit(&self.app_handle);
     }
@@ -1110,6 +1300,94 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        let settings = get_settings(&self.app_handle);
+        let task = if settings.translate_to_english {
+            TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            }
+        } else {
+            TranscriptionTask::Transcribe
+        };
+        self.transcribe_with_task(audio, task)
+    }
+
+    /// Run the primary and secondary models on identical audio. The current
+    /// manager owns one engine, so this first implementation swaps models in a
+    /// bounded sequence and restores the primary selection before returning.
+    /// The default single-model path remains untouched; an engine pool can
+    /// replace this implementation once memory benchmarks justify residency.
+    pub fn transcribe_with_secondary(
+        &self,
+        audio: Vec<f32>,
+        task: TranscriptionTask,
+        secondary_model_id: &str,
+    ) -> Result<ResolvedTranscript> {
+        let settings = get_settings(&self.app_handle);
+        let primary_model_id = self
+            .get_current_model()
+            .unwrap_or_else(|| settings.selected_model.clone());
+        if primary_model_id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No primary transcription model is selected"
+            ));
+        }
+        if secondary_model_id == primary_model_id {
+            return Err(anyhow::anyhow!(
+                "The secondary transcription model must differ from the primary model"
+            ));
+        }
+
+        let primary_started = Instant::now();
+        let primary_result = self.transcribe_with_task(audio.clone(), task.clone());
+        let primary_candidate = match primary_result {
+            Ok(text) => TranscriptCandidate {
+                model_id: primary_model_id.clone(),
+                text,
+                elapsed_ms: primary_started.elapsed().as_millis() as u64,
+                error: None,
+            },
+            Err(error) => TranscriptCandidate {
+                model_id: primary_model_id.clone(),
+                text: String::new(),
+                elapsed_ms: primary_started.elapsed().as_millis() as u64,
+                error: Some(error.to_string()),
+            },
+        };
+
+        let secondary_started = Instant::now();
+        let secondary_result = (|| -> Result<String> {
+            self.load_model(secondary_model_id)?;
+            self.transcribe_with_task(audio, task)
+        })();
+        let secondary_candidate = match secondary_result {
+            Ok(text) => TranscriptCandidate {
+                model_id: secondary_model_id.to_string(),
+                text,
+                elapsed_ms: secondary_started.elapsed().as_millis() as u64,
+                error: None,
+            },
+            Err(error) => TranscriptCandidate {
+                model_id: secondary_model_id.to_string(),
+                text: String::new(),
+                elapsed_ms: secondary_started.elapsed().as_millis() as u64,
+                error: Some(error.to_string()),
+            },
+        };
+
+        // Restore the user's primary model even if the verifier failed. Honor
+        // the existing immediate-unload policy after restoration.
+        if let Err(error) = self.load_model(&primary_model_id) {
+            warn!(
+                "Failed to restore primary model '{}': {}",
+                primary_model_id, error
+            );
+        }
+        self.maybe_unload_immediately("dual-model restore");
+
+        resolve_transcript_candidates(vec![primary_candidate, secondary_candidate])
+    }
+
+    pub fn transcribe_with_task(&self, audio: Vec<f32>, task: TranscriptionTask) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
@@ -1236,17 +1514,23 @@ impl TranscriptionManager {
                         // whisper run extension to a non-whisper arch is rejected
                         // with INVALID_ARG, so skip it there and let the fuzzy
                         // post-correction handle custom words instead.
-                        let family = if settings.custom_words.is_empty() || !model_is_whisper {
+                        let family = if !model_is_whisper || !model_takes_initial_prompt {
                             None
                         } else {
-                            Some(RunExtension::Whisper(WhisperRunOptions {
-                                initial_prompt: Some(settings.custom_words.join(", ")),
-                                ..Default::default()
-                            }))
+                            whisper_initial_prompt(
+                                &settings.custom_words,
+                                &settings.transcription_context,
+                            )
+                            .map(|initial_prompt| {
+                                RunExtension::Whisper(WhisperRunOptions {
+                                    initial_prompt: Some(initial_prompt),
+                                    ..Default::default()
+                                })
+                            })
                         };
 
                         let run_plan = transcribe_cpp_run_plan(
-                            settings.translate_to_english,
+                            &task,
                             &validated_language,
                             &model_languages,
                             model_supports_translate,
@@ -1322,13 +1606,19 @@ impl TranscriptionManager {
                         } else {
                             Some(validated_language.clone())
                         };
-                        let options = TranscribeOptions {
+                        let target_language = match &task {
+                            TranscriptionTask::Translate { target_language } => {
+                                Some(normalize_cjk_language(target_language).to_string())
+                            }
+                            TranscriptionTask::Transcribe => None,
+                        };
+                        let options = CanaryParams {
                             language: lang,
-                            translate: settings.translate_to_english,
+                            target_language,
                             ..Default::default()
                         };
                         canary_engine
-                            .transcribe(&audio, &options)
+                            .transcribe_with(&audio, &options)
                             .map(|r| r.text)
                             .map_err(|e| anyhow::anyhow!("Canary transcription failed: {}", e))
                     }
@@ -1396,12 +1686,15 @@ impl TranscriptionManager {
         // Apply fuzzy word correction if custom words are configured — UNLESS the
         // words were already handed to the model as an initial prompt (whisper
         // family). We don't pass a prompt to non-whisper models (it requires the
-        // whisper-kind run extension), so they still get fuzzy correction here,
-        // same as the ONNX engines.
-        let filtered_result = post_process_transcription_text(result, &settings, model_is_whisper);
+        // whisper-kind run extension), or to a Whisper model that does not
+        // advertise initial-prompt support, so those paths still get fuzzy
+        // correction here, same as the ONNX engines.
+        let initial_prompt_applied = model_is_whisper && model_takes_initial_prompt;
+        let filtered_result =
+            post_process_transcription_text(result, &settings, initial_prompt_applied);
 
         let et = std::time::Instant::now();
-        let translation_note = if settings.translate_to_english {
+        let translation_note = if matches!(task, TranscriptionTask::Translate { .. }) {
             " (translated)"
         } else {
             ""
@@ -1552,6 +1845,21 @@ fn normalize_cjk_language(language: &str) -> &str {
     }
 }
 
+/// Compose the bounded decoding hint shared by all local Whisper-family runs.
+/// Custom words remain useful as a compact vocabulary list, while the free-form
+/// context lets users provide names, jargon, or a meeting/project topic.
+fn whisper_initial_prompt(custom_words: &[String], context: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let context = context.trim();
+    if !context.is_empty() {
+        parts.push(context.to_string());
+    }
+    if !custom_words.is_empty() {
+        parts.push(custom_words.join(", "));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 /// Resolve the persisted language intent into the language a specific model can
 /// use without writing the coerced value back to settings.
 fn effective_language_for_model(
@@ -1578,7 +1886,7 @@ struct TranscribeCppRunPlan {
 /// Build the transcribe-cpp language/task options shared by batch and live
 /// streaming paths.
 fn transcribe_cpp_run_plan(
-    translate_to_english: bool,
+    task: &TranscriptionTask,
     effective_language: &str,
     model_languages: &[String],
     model_supports_translate: bool,
@@ -1592,11 +1900,8 @@ fn transcribe_cpp_run_plan(
     // UNSUPPORTED_LANGUAGE. Language-agnostic models report an empty list, so
     // they always stay on auto.
     let language = requested_language.filter(|lang| model_languages.iter().any(|l| l == lang));
-    let (task, target_language) = cpp_translation_task(
-        translate_to_english,
-        model_supports_translate,
-        language.as_deref(),
-    );
+    let (task, target_language) =
+        cpp_translation_task(task, model_supports_translate, language.as_deref());
 
     TranscribeCppRunPlan {
         task,
@@ -1661,14 +1966,16 @@ where
 ///
 /// Returns `(task, target_language)` ready to drop into `RunOptions`.
 fn cpp_translation_task(
-    translate_to_english: bool,
+    requested_task: &TranscriptionTask,
     model_supports_translate: bool,
     source_language: Option<&str>,
 ) -> (Task, Option<String>) {
-    let translate_to_en =
-        translate_to_english && model_supports_translate && source_language != Some("en");
-    if translate_to_en {
-        (Task::Translate, Some("en".to_string()))
+    let TranscriptionTask::Translate { target_language } = requested_task else {
+        return (Task::Transcribe, None);
+    };
+    let target_language = normalize_cjk_language(target_language);
+    if model_supports_translate && source_language != Some(target_language) {
+        (Task::Translate, Some(target_language.to_string()))
     } else {
         (Task::Transcribe, None)
     }
@@ -1971,6 +2278,133 @@ pub fn get_available_accelerators() -> AvailableAccelerators {
 mod tests {
     use super::*;
 
+    #[test]
+    fn resolver_keeps_primary_formatting_when_candidates_agree() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: "Hello, world!".to_string(),
+                elapsed_ms: 10,
+                error: None,
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: " hello   world ".to_string(),
+                elapsed_ms: 12,
+                error: None,
+            },
+        ])
+        .expect("matching candidates should resolve");
+
+        assert_eq!(resolved.text, "Hello, world!");
+        assert!(matches!(
+            resolved.method,
+            ResolutionMethod::PrimaryAgreement
+        ));
+        assert!(resolved.agreement_score > 0.8);
+    }
+
+    #[test]
+    fn resolver_uses_secondary_when_primary_fails() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: String::new(),
+                elapsed_ms: 10,
+                error: Some("model failed".to_string()),
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: "Recovered output".to_string(),
+                elapsed_ms: 12,
+                error: None,
+            },
+        ])
+        .expect("secondary candidate should recover a failed primary");
+
+        assert_eq!(resolved.text, "Recovered output");
+        assert_eq!(resolved.selected_model_id, "secondary");
+        assert!(matches!(
+            resolved.method,
+            ResolutionMethod::SecondaryFallback
+        ));
+    }
+
+    #[test]
+    fn resolver_keeps_primary_with_low_agreement_warning_on_disagreement() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: "The quick brown fox".to_string(),
+                elapsed_ms: 10,
+                error: None,
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: "Completely different sentence here".to_string(),
+                elapsed_ms: 12,
+                error: None,
+            },
+        ])
+        .expect("disagreement should still resolve");
+
+        assert_eq!(resolved.text, "The quick brown fox");
+        assert_eq!(resolved.selected_model_id, "primary");
+        assert!(matches!(
+            resolved.method,
+            ResolutionMethod::LowAgreementWarning
+        ));
+        assert!(resolved.agreement_score < 0.80);
+        let report = resolved
+            .to_verification_report()
+            .expect("report should be available");
+        assert!(report.low_agreement);
+    }
+
+    #[test]
+    fn resolver_primary_fallback_when_secondary_fails() {
+        let resolved = resolve_transcript_candidates(vec![
+            TranscriptCandidate {
+                model_id: "primary".to_string(),
+                text: "Primary only".to_string(),
+                elapsed_ms: 10,
+                error: None,
+            },
+            TranscriptCandidate {
+                model_id: "secondary".to_string(),
+                text: String::new(),
+                elapsed_ms: 12,
+                error: Some("secondary failed".to_string()),
+            },
+        ])
+        .expect("primary should survive secondary failure");
+
+        assert_eq!(resolved.text, "Primary only");
+        assert!(matches!(resolved.method, ResolutionMethod::PrimaryFallback));
+    }
+
+    #[test]
+    fn whisper_initial_prompt_combines_context_and_custom_words() {
+        let prompt = whisper_initial_prompt(
+            &["Graphify".to_string(), "Tauri".to_string()],
+            "A Handy architecture review",
+        );
+
+        assert_eq!(
+            prompt.as_deref(),
+            Some("A Handy architecture review\nGraphify, Tauri")
+        );
+    }
+
+    #[test]
+    fn whisper_initial_prompt_omits_empty_hints() {
+        assert_eq!(whisper_initial_prompt(&[], "  "), None);
+        assert_eq!(
+            whisper_initial_prompt(&["Handy".to_string()], "  ").as_deref(),
+            Some("Handy")
+        );
+    }
+
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()
     }
@@ -2025,7 +2459,12 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_maps_chinese_variants() {
-        let plan = transcribe_cpp_run_plan(false, "zh-Hant", &languages(&["zh"]), true);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Transcribe,
+            "zh-Hant",
+            &languages(&["zh"]),
+            true,
+        );
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("zh"));
@@ -2034,7 +2473,14 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_skips_english_translation() {
-        let plan = transcribe_cpp_run_plan(true, "en", &languages(&["en", "es"]), true);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            },
+            "en",
+            &languages(&["en", "es"]),
+            true,
+        );
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("en"));
@@ -2043,7 +2489,14 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_translates_supported_non_english() {
-        let plan = transcribe_cpp_run_plan(true, "es", &languages(&["en", "es"]), true);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            },
+            "es",
+            &languages(&["en", "es"]),
+            true,
+        );
 
         assert!(matches!(plan.task, Task::Translate));
         assert_eq!(plan.language.as_deref(), Some("es"));
@@ -2052,7 +2505,14 @@ mod tests {
 
     #[test]
     fn transcribe_cpp_run_plan_requires_model_translation_support() {
-        let plan = transcribe_cpp_run_plan(true, "es", &languages(&["en", "es"]), false);
+        let plan = transcribe_cpp_run_plan(
+            &TranscriptionTask::Translate {
+                target_language: "en".to_string(),
+            },
+            "es",
+            &languages(&["en", "es"]),
+            false,
+        );
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("es"));
