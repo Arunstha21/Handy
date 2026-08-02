@@ -53,3 +53,33 @@ jobs:
       # canonical repository still signs release builds.
       sign-binaries: ${{ github.repository_owner == 'cjpais' }}
     secrets: inherit
+
+  # Forks cannot sign binaries, but their successful unsigned matrix still
+  # produces useful release assets. Publish those artifacts to the existing
+  # versioned release after the matrix completes.
+  publish-release-assets:
+    if: github.repository_owner != 'cjpais'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: handy-*
+          path: release-artifacts
+          merge-multiple: false
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          while IFS= read -r -d '' asset; do
+            gh release upload "v${version}" "$asset" --repo "${GITHUB_REPOSITORY}" --clobber
+          done < <(find release-artifacts -type f -print0)
